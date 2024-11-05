@@ -1,0 +1,46 @@
+<dwarf>
+	<register_mappings>
+		<!-- General Purpose Registers -->
+		<register_mapping dwarf="0" ghidra="r0"/>
+		<register_mapping dwarf="1" ghidra="r1" stackpointer="true"/>
+		<register_mapping dwarf="2" ghidra="r2" auto_count="30"/> <!-- r2...r31 -->
+
+		<!-- Floating Point Registers (if applicable) -->
+		<register_mapping dwarf="32" ghidra="f0" auto_count="32"/> <!-- f0...f31 -->
+
+		<!-- Condition Register Fields -->
+		<register_mapping dwarf="64" ghidra="cr0" auto_count="8"/> <!-- cr0...cr7 -->
+
+		<!-- Special Purpose Registers -->
+		<register_mapping dwarf="66" ghidra="MSR"/> <!-- Machine State Register -->
+		<register_mapping dwarf="67" ghidra="DEAR"/> <!-- Data Exception Address Register -->
+		<register_mapping dwarf="68" ghidra="ESR"/> <!-- Exception Syndrome Register -->
+		<register_mapping dwarf="69" ghidra="IVPR"/> <!-- Interrupt Vector Prefix Register -->
+		<register_mapping dwarf="70" ghidra="sr0" auto_count="16"/> <!-- Segment Registers (sr0...sr15) -->
+
+		<!-- Additional MPC5746R-Specific Special Registers -->
+		<register_mapping dwarf="80" ghidra="TSPRSC"/> <!-- Time Stamp Prescaler Value (SRX) -->
+		<register_mapping dwarf="81" ghidra="F_RDY"/> <!-- Fast Message Data Ready (SRX) -->
+		<register_mapping dwarf="82" ghidra="S_RDY"/> <!-- Slow Serial Message Data Ready (SRX) -->
+		<register_mapping dwarf="83" ghidra="NIBBCH0"/> <!-- Data Nibble Count (SRX) -->
+		<register_mapping dwarf="84" ghidra="CRC4b"/> <!-- 4-bit CRC Value (SRX) -->
+		<register_mapping dwarf="85" ghidra="CHNUM"/> <!-- Channel Number (SRX) -->
+		<register_mapping dwarf="86" ghidra="SMCRC"/> <!-- 6-bit CRC Value (SRX) -->
+		<register_mapping dwarf="87" ghidra="TS"/> <!-- Time Stamp for Messages (SRX) -->
+
+		<!-- System Control and Debug Registers -->
+		<register_mapping dwarf="101" ghidra="XER"/> <!-- Fixed-Point Exception Register -->
+		<register_mapping dwarf="108" ghidra="LR"/>  <!-- Link Register -->
+		<register_mapping dwarf="109" ghidra="CTR"/> <!-- Count Register -->
+		<register_mapping dwarf="118" ghidra="DSISR"/> <!-- Data Storage Interrupt Status Register -->
+		<register_mapping dwarf="119" ghidra="DAR"/> <!-- Data Address Register -->
+		
+		<!-- Optional: Debug & Other Registers (if applicable) -->
+		<register_mapping dwarf="130" ghidra="PIR"/> <!-- Processor ID Register -->
+		<register_mapping dwarf="131" ghidra="TBL"/> <!-- Time Base Lower Register -->
+		<register_mapping dwarf="132" ghidra="TBU"/> <!-- Time Base Upper Register -->
+	</register_mappings>
+
+	<!-- Call Frame Information for the MPC5746R -->
+	<call_frame_cfa value="1"/> <!-- Use value "1" to represent CFA with r1 (Stack Pointer) for this architecture -->
+</dwarf>

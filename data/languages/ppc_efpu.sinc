@@ -1,0 +1,467 @@
+# PowerPC Embedded Floating-Point Unit (EFPU/SPE) Instructions
+# Based on PowerISA Version 2.06 Revision B and VLE extensions from EB689
+
+define pcodeop max_float;
+define pcodeop min_float;
+
+# Conversion Operations
+:efscfsf D,B is OP=4 & D & B & XOP_0_10=0x2D3 & BITS_16_20=0
+{
+   # load fractional divisor as a float
+   tmpA:4 = 0x80000000;
+   tmpA = int2float(tmpA);
+   setFPRF(tmpA);
+
+   # check if negative
+   if ((B:4 & 0x80000000) != 0) goto <negative>;
+
+   # float the fractional portion of register B
+   tmpB:4 = int2float(B:4);
+   setFPRF(tmpB);
+   tmpB = tmpB f/ tmpA;
+   setFPDivFlags(tmpB, tmpA, tmpB);
+
+   goto <done>;
+
+   <negative>
+   # float the fractional portion of register B, 2's complement negate
+   tmpB = int2float(-(B:4));
+   setFPRF(tmpB);
+   tmpB = tmpB f/ tmpA;
+   setFPDivFlags(tmpB, tmpA, tmpB);
+
+   # negate the float
+   tmpB = f-(tmpB);
+   setFPRF(tmpB);
+ 
+   <done>
+   setSummaryFPSCR();
+
+   # assign to lower word of D
+   D = (D & 0xFFFFFFFF00000000) | zext(tmpB);
+}
+
+# binutils-descr: "lbdx",	X(31,515),	X_MASK,      E500MC,	PPCNONE,	{RT, RA, RB}
+define pcodeop lbdxOp;
+# ISA-info: lbdx - Form "X" Page 708 Category "DS"
+# binutils: e500mc.d:   68:	7c 01 14 06 	lbdx    r0,r1,r2
+:lbdx RT,A,B is OP=31 & XOP_1_10=515 & RT & A & B & BIT_0=0  { RT = lbdxOp(RT,A,B); } 
+
+:efscfsi D,B is OP=4 & D & B & XOP_0_10=0x2D1 & BITS_16_20=0
+{
+   # check if negative
+   if ((B:4 & 0x80000000) != 0) goto <negative>;
+
+   # float the integer portion of register B
+   tmpB:4 = int2float(B:4);
+   setFPRF(tmpB);
+
+   goto <done>;
+
+   <negative>
+   # float the integer portion of register B, 2's complement negate
+   tmpB = int2float(-(B:4));
+   setFPRF(tmpB);
+
+   # negate the float
+   tmpB = f-(tmpB);
+   setFPRF(tmpB);
+ 
+   <done>
+   setSummaryFPSCR();
+
+   # assign to lower word of D
+   D = (D & 0xFFFFFFFF00000000) | zext(tmpB);
+}
+
+:efscfuf D,B is OP=4 & D & B & XOP_0_10=0x2D2 & BITS_16_20=0
+{
+   # load fractional divisor as a float
+   tmpA:8 = 0x0000000100000000;
+   tmpA = int2float(tmpA);
+   setFPRF(tmpA);
+
+   # float the fractional portion of register B
+   tmpB:8 = int2float(B:4);
+   setFPRF(tmpB);
+   tmpB = tmpB f/ tmpA;
+   setFPDivFlags(tmpB, tmpA, tmpB);
+
+   tmpC:4 = float2float(tmpB);
+   setFPRF(tmpC);
+
+   setSummaryFPSCR();
+
+   # assign to lower word of D
+   D = (D & 0xFFFFFFFF00000000) | zext(tmpC);
+}
+
+:efscfui D,B is OP=4 & D & B & XOP_0_10=0x2D0 & BITS_16_20=0
+{
+   tmp:4 = int2float(B:4);
+   setFPRF(tmp);
+
+   # assign to lower word of D
+   D = (D & 0xFFFFFFFF00000000) | zext(tmp);
+   setSummaryFPSCR();
+}
+
+:efsctuf D,B is OP=4 & D & B & XOP_0_10=0x2D6 & BITS_16_20=0
+{
+   # multiply by 0x0000 0001 0000 0000 to scale the fraction up to integer range
+   # load fractional multiplier as a float
+   tmpM:8 = 0x0000000100000000;
+   tmpM = int2float(tmpM);
+   setFPRF(tmpM);
+
+   # load saturation limit as a float
+   tmpL:8 = 0x0000000100000000 - 1;
+   tmpL = int2float(tmpL);
+   setFPRF(tmpL);
+
+   # scale the saturation limit to a fractional float
+   tmpL = tmpL f/ tmpM;
+   setFPDivFlags(tmpL, tmpM, tmpL);
+
+   # get B float up to 64 bit width
+   tmpB:8 = float2float(B:4);
+   setFPRF(tmpB);
+
+   # check if less than or equal to positive saturation limit
+   if (tmpB f<= tmpL) goto <done>;
+   # set to saturation
+   tmpB = tmpL;
+
+   <done>
+   # scale the fractional portion up to integer side of mantissa
+   tmpB = tmpB f* tmpM;
+   setFPMulFlags(tmpB, tmpM, tmpB);
+
+   # truncate back to integer
+   tmpC:4 = trunc(tmpB);
+   setFPRF(tmpC);
+
+   setSummaryFPSCR();
+
+   # assign to lower word of D
+   D = (D & 0xFFFFFFFF00000000) | zext(tmpC);
+}
+
+:efsctui D,B is OP=4 & D & B & XOP_0_10=0x2D4 & BITS_16_20=0
+{
+   tmpB:8 = trunc(round(B:4));
+   setFPRF(tmpB);
+
+   # limit to saturation
+   if (tmpB <= 0x000000007FFFFFFF) goto <done>;
+   tmpB = 0x000000007FFFFFFF;
+
+   <done>
+   setSummaryFPSCR();
+
+   # assign to lower word of D
+   D = (D & 0xFFFFFFFF00000000) | zext(tmpB:4);
+}
+
+:efsctsi D,B is OP=4 & D & B & XOP_0_10=0x2D5 & BITS_16_20=0
+{
+   # create zero float constant
+   tmpA:4 = 0;
+   tmpA = int2float(tmpA);
+
+   # check if negative
+   if (B:4 f< tmpA) goto <negative>;
+
+   tmpB:8 = trunc(round(B:4));
+   setFPRF(tmpB);
+
+   # limit to positive saturation
+   if (tmpB <= 0x000000007FFFFFFF) goto <positive_clipped>;
+   tmpB = 0x000000007FFFFFFF;
+
+   <positive_clipped>
+   goto <done>;
+
+   <negative>
+   # negate the float
+   tmpB = trunc(round(f-(B:4)));
+   setFPRF(tmpB);
+
+   # limit to negative saturation
+   if (tmpB <= 0x0000000080000000) goto <negative_clipped>;
+   tmpB = 0x0000000080000000;
+
+   <negative_clipped>
+   # negate the signed int
+   tmpB = -(tmpB);
+
+   <done>
+   setSummaryFPSCR();
+
+   # assign to lower word of D
+   D = (D & 0xFFFFFFFF00000000) | zext(tmpB:4);
+}
+
+:efsctsiz D,B is OP=4 & D & B & XOP_0_10=0x2DA & BITS_16_20=0
+{
+   # create zero float constant
+   tmpA:4 = 0;
+   tmpA = int2float(tmpA);
+
+   # check if negative
+   if (B:4 f< tmpA) goto <negative>;
+
+   tmpB:8 = trunc(B:4);
+   setFPRF(tmpB);
+
+   # limit to saturation
+   if (tmpB <= 0x000000007FFFFFFF) goto <positive_clipped>;
+   tmpB = 0x000000007FFFFFFF;
+
+   <positive_clipped>
+   goto <done>;
+
+   <negative>
+   # negate the float
+   tmpB = trunc(f-(B:4));
+   setFPRF(tmpB);
+
+   # limit to saturation
+   if (tmpB <= 0x0000000080000000) goto <negative_clipped>;
+   tmpB = 0x0000000080000000;
+
+   <negative_clipped>
+   # negate the signed int
+   tmpB = -(tmpB);
+
+   <done>
+   setSummaryFPSCR();
+
+   # assign to lower word of D
+   D = (D & 0xFFFFFFFF00000000) | zext(tmpB:4);
+}
+
+:efsctuiz D,B is OP=4 & D & B & XOP_0_10=0x2D8 & BITS_16_20=0
+{
+   tmpB:8 = trunc(B:4);
+   setFPRF(tmpB);
+
+   # limit to saturation
+   if (tmpB <= 0x000000007FFFFFFF) goto <done>;
+   tmpB = 0x000000007FFFFFFF;
+
+   <done>
+   setSummaryFPSCR();
+
+   # assign to lower word of D
+   D = (D & 0xFFFFFFFF00000000) | zext(tmpB:4);
+}
+
+# Base Arithmetic Operations
+:efsabs D,A is OP=4 & D & A & XOP_0_10=0x2C4 & BITS_11_15=0
+{
+   # assign to lower word of D
+   D = (D & 0xFFFFFFFF00000000) | zext(abs(A:4));
+}
+
+:efsnabs D,A is OP=4 & D & A & XOP_0_10=0x2C5 & BITS_11_15=0
+{
+   # assign to lower word of D
+   D = (D & 0xFFFFFFFF00000000) | zext(f-(abs(A:4)));
+   setFPRF(D:4);
+   setSummaryFPSCR();
+}
+
+:efsadd D,A,B is OP=4 & D & A & B & XOP_0_10=0x2C0
+{
+   # assign to lower word of D
+   D = (D & 0xFFFFFFFF00000000) | zext(A:4 f+ B:4);
+   setFPAddFlags(A:4, B:4, D:4);
+}
+
+:efssub D,A,B is OP=4 & D & A & B & XOP_0_10=0x2C1
+{
+   # assign to lower word of D
+   D = (D & 0xFFFFFFFF00000000) | zext(A:4 f- B:4);
+   setFPSubFlags(A:4, B:4, D:4);
+   setSummaryFPSCR();
+}
+
+:efsmul D,A,B is OP=4 & D & A & B & XOP_0_10=0x2C8
+{
+   # assign to lower word of D
+   D = (D & 0xFFFFFFFF00000000) | zext(A:4 f* B:4);
+   setFPMulFlags(A:4, B:4, D:4);
+}
+
+:efsdiv D,A,B is OP=4 & D & A & B & XOP_0_10=0x2C9
+{
+   # assign to lower word of D
+   D = (D & 0xFFFFFFFF00000000) | zext(A:4 f/ B:4);
+   setFPDivFlags(A:4, B:4, D:4);
+}
+
+# Compare Instructions
+:efscmpeq CRFD,A,B is OP=4 & CRFD & A & B & XOP_0_10=0x2CE & BITS_21_22=0
+{
+   CRFD[2,1] = A:4 f== B:4;
+}
+
+:efscmpgt CRFD,A,B is OP=4 & CRFD & A & B & XOP_0_10=0x2CC & BITS_21_22=0
+{
+   CRFD[2,1] = A:4 f> B:4;
+}
+
+:efscmplt CRFD,A,B is OP=4 & CRFD & A & B & XOP_0_10=0x2CD & BITS_21_22=0
+{
+   CRFD[2,1] = A:4 f< B:4;
+}
+
+# Test Instructions
+:efststeq CRFD,A,B is OP=4 & CRFD & A & B & XOP_0_10=0x2DE & BITS_21_22=0
+{
+   CRFD[2,1] = A:4 f== B:4;
+}
+
+# efsmin rT,rA,rB      010 1100 1010
+:efsmin D,A,B is OP=4 & D & A & B & XOP_0_10=0x2B1
+{
+    local result:4 = min_float(A:4, B:4);
+    D = (D & 0xFFFFFFFF00000000) | zext(result);
+    setSummaryFPSCR();
+}
+
+# efsmax rT,rA,rB      010 1100 1011
+:efsmax D,A,B is OP=4 & D & A & B & XOP_0_10=0x2b0
+{
+    local result:4 = max_float(A:4, B:4);
+    D = (D & 0xFFFFFFFF00000000) | zext(result);
+    setSummaryFPSCR();
+}
+
+# e_addbus - Add Byte Unsigned
+:e_addbus D, A, B is OP=31 & D & A & B & XOP_0_10=0x7D4
+{
+    local result:1 = (A:1 + B:1) & 0xFF;
+    D = zext(result);
+}
+
+# e_addhus - Add Halfword Unsigned Saturate
+:e_addhus D, A, B is OP=31 & D & A & B & XOP_0_10=0x754
+{
+    local a:2 = A:2;
+    local b:2 = B:2;
+    local sum:2 = a + b;
+    local carry:1 = (sum < a);
+    local result:2 = sum;
+    if (carry != 0) goto <saturate>;
+    goto <done>;
+    <saturate>
+    result = 0xffff;
+    <done>
+    D = zext(result);
+}
+
+# e_subfhus - Subtract Halfword Unsigned Saturate
+:e_subfhus D, A, B is OP=31 & D & A & B & XOP_0_10=0x750
+{
+    local a:2 = A:2;
+    local b:2 = B:2;
+    local result:2 = b - a;
+    if (b < a) goto <saturate>;
+    goto <done>;
+    <saturate>
+    result = 0;
+    <done>
+    D = zext(result);
+}
+
+# e_subfbus - Subtract Byte Unsigned
+:e_subfbus D, A, B is OP=31 & D & A & B & XOP_0_10=0x7d0
+{
+    local a:1 = A:1;
+    local b:1 = B:1;
+    local result:1 = b - a;
+    D = zext(result);
+}
+
+# e_addwus - Add Word Unsigned
+:e_addwus D, A, B is OP=31 & D & A & B & XOP_0_10=0x6D4
+{
+    local result:$(REGISTER_SIZE) = A + B;
+    D = result;
+}
+
+# efststgt CRFD,rA,rB        010 1101 1100
+#define pcodeop FloatingPointTestGreaterThan;
+:efststgt CRFD,A,B is OP=4 & CRFD & A & B & XOP_0_10=0x2DC & BITS_21_22=0
+{
+  CRFD[2,1] = A:4 f> B:4;
+}
+
+# =================================================================
+# Page 430
+
+# efststlt CRFD,rA,rB        010 1101 1101
+#define pcodeop FloatingPointTestLessThan;
+:efststlt CRFD,A,B is OP=4 & CRFD & A & B & XOP_0_10=0x2DD & BITS_21_22=0
+{
+  CRFD[2,1] = A:4 f< B:4;
+}
+
+# efsmadd rD,rA,rB
+# Floating-Point Single-Precision Multiply-Add
+:efsmadd D,A,B is OP=4 & D & A & B & XOP_0_10=0x2C2
+{
+	local lo:4 = (A:4 f* B:4) f+ D:4;
+	D = (D & 0xFFFFFFFF00000000) | zext(lo);
+}
+
+# efsmsub rD,rA,rB
+# Floating-Point Single-Precision Multiply-Substract
+:efsmsub D,A,B is OP=4 & D & A & B & XOP_0_10=0x2C3
+{
+	local lo:4 = (A:4 f* B:4) f- D:4;
+	D = (D & 0xFFFFFFFF00000000) | zext(lo);
+}
+
+# efsnmadd rD,rA,rB
+# Floating-Point Single-Precision Negative Multiply-Add
+:efsnmadd D,A,B is OP=4 & D & A & B & XOP_0_10=0x2CA
+{
+	local lo:4 = f- ((A:4 f* B:4) f+ D:4);
+	D = (D & 0xFFFFFFFF00000000) | zext(lo);
+}
+
+# efsnmsub rD,rA,rB
+# Floating-Point Single-Precision Negative Multiply-Substract
+:efsnmsub D,A,B is OP=4 & D & A & B & XOP_0_10=0x2CB
+{
+	local lo:4 = f- ((A:4 f* B:4) f- D:4);
+	D = (D & 0xFFFFFFFF00000000) | zext(lo);
+}
+
+# efsneg rT,rA         010 1100 0110
+#define pcodeop FloatingPointNegate;
+:efsneg D,A is OP=4 & D & A & XOP_0_10=0x2C6 & BITS_11_15=0
+{
+   # assign to lower word of D
+   D = ( D & 0xFFFFFFFF00000000 ) | zext( f-( A:4 ) );
+   setFPRF( D:4 );
+   setSummaryFPSCR();
+}
+
+# e_stmvmcsrrw - Store Multiple CSRR Registers Word 
+:e_stmvmcsrrw RA,RS is OP=31 & RA & RS & XOP_0_10=0x7C6
+{
+    local addr:4 = RA;
+    
+    # Store each CSRR register word sequentially
+    *[ram]:4 addr = CSRR0;
+    addr = addr + 4;
+    *[ram]:4 addr = CSRR1;
+    addr = addr + 4;
+    
+    # Update the address register
+    RA = addr;
+}

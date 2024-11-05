@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<language_definitions>
+  <language processor="PowerPC"
+            endian="big"
+            size="32"
+            variant="MPC5746R"
+            version="1.0"
+            slafile="MPC5746R_VLE.sla"
+            processorspec="ppc_32.pspec"
+            manualindexfile="../manuals/PowerISA.idx"
+            id="PowerPC:BE:32:VLE:MPC5746R">
+    <description>PowerPC 32 VLE MPC5746R Microcontroller</description>
+    <compiler name="default" spec="ppc_32_be.cspec" id="default"/>
+  </language> 
+</language_definitions>

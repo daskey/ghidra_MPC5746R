@@ -1,0 +1,13 @@
+# SLA Specification File for MPC5746R VLE Mode (32-bit Instructions Only)
+# Based on PowerPC VLE (Variable Length Encoding) Specification
+
+@define ENDIAN "big"      # Must come first
+@define WORDSIZE "32"
+@define REGISTER_SIZE "4"
+
+# Include required base PowerPC files
+@include "ppc_common.sinc"
+@include "ppc_vle.sinc"
+@include "SPEF_SCR.sinc"
+@include "ppc_efpu.sinc"
+@include "quicciii.sinc"
