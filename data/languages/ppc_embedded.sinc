@@ -200,9 +200,6 @@ define pcodeop memoryBarrier;
     D = TLBWrite(D,A,B_BITS:1);
 }
 
-:tlbsync is OP=31 & XOP_1_10=566
-{
-}
 
 #wrtee r0       0x7c 00 01 06
 :wrtee S	is OP=31 & S & XOP_1_10=131

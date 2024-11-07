@@ -5,9 +5,6 @@
 <processor_spec>
   <programcounter register="PC"/>
   <data_space space="ram"/>
-  <volatile outputop="write" inputop="read">
-    <range space="ram" first="0x0" last="0x20"/>
-  </volatile>
   <context_data>
     <context_set space="ram">
       <set name="VLE" val="1" description="Variable Length Encoding"/>
