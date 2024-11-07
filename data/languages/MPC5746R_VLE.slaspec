@@ -1,13 +1,17 @@
-# SLA specification file for the Power ISA Embedded e200 32-bit big endian core w/VLE
+# SLA specification file for IBM PowerPC e200 series core
+# Note: e200 series use VLE, with exception of e200z7 which supports both VLE and non-VLE
 
+@define E200
 @define ENDIAN "big"
-
 @define REGISTER_SIZE "4"
+@define EATRUNC "ea"
+@define CTR_OFFSET "32"
+@define NoLegacyIntegerMultiplyAccumulate
 
 @include "ppc_common.sinc"
 @include "ppc_vle.sinc"
+@include "evx.sinc"
 @include "quicciii.sinc"
-@include "Scalar_SPFP.sinc"
 @include "SPE_FloatMulAdd.sinc"
 
 
@@ -15,4 +19,3 @@
 @include "vle_operations.sinc"
 @include "spe_float.sinc"
 @include "system_control.sinc"
-@include "SPEF_SCR.sinc"

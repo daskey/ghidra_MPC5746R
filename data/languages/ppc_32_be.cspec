@@ -3,8 +3,6 @@
 <compiler_spec>
   <global>
     <range space="ram"/>
-    <register name="r13"/>
-    <register name="r2"/>
   </global>
   <stackpointer register="r1" space="ram"/>
   <default_proto>
@@ -81,41 +79,11 @@
         <pentry minsize="1" maxsize="8" metatype="float" extension="float">
           <register name="f1"/>
         </pentry>
-        <pentry minsize="1" maxsize="4">
+        <pentry minsize="1" maxsize="4" extension="inttype">
           <register name="r3"/>
-        </pentry>
-        <pentry minsize="1" maxsize="4">
-          <register name="r4"/>
-        </pentry>
-        <pentry minsize="1" maxsize="4">
-          <register name="r5"/>
-        </pentry>
-        <pentry minsize="1" maxsize="4">
-          <register name="r6"/>
-        </pentry>
-        <pentry minsize="1" maxsize="4">
-          <register name="r7"/>
-        </pentry>
-        <pentry minsize="1" maxsize="4">
-          <register name="r8"/>
-        </pentry>
-        <pentry minsize="1" maxsize="4">
-          <register name="r9"/>
-        </pentry>
-        <pentry minsize="1" maxsize="4">
-          <register name="r10"/>
         </pentry>
         <pentry minsize="5" maxsize="8">
           <addr space="join" piece1="r3" piece2="r4"/>
-        </pentry>
-        <pentry minsize="5" maxsize="8">
-          <addr space="join" piece1="r5" piece2="r6"/>
-        </pentry>
-        <pentry minsize="5" maxsize="8">
-          <addr space="join" piece1="r7" piece2="r8"/>
-        </pentry>
-        <pentry minsize="5" maxsize="8">
-          <addr space="join" piece1="r9" piece2="r10"/>
         </pentry>
       </output>
       <unaffected>
@@ -148,7 +116,6 @@
   </default_proto>
 
   <callfixup name="get_pc_thunk_lr">
-    <target name="__get_pc_thunk_lr"/>
     <pcode>
       <body><![CDATA[
       LR = inst_dest + 4;
