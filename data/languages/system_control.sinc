@@ -1,8 +1,0 @@
-:se_nop      is OP=1 & XOP_0_5=0x00 {
-    # SE no operation
-}
-
-# mpusync # MPU Synchronize Instruction
-:mpusync is $(ISVLE) & OP16_VLE=16 {
-    instructionSynchronize();
-}

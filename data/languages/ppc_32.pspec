@@ -11,18 +11,10 @@
   <context_data>
     <context_set space="ram">
       <set name="linkreg" val="0"/>
-
-      <!-- e200 series uses VLE, with exception of e200z7 which supports both. Enable VLE
-           decoding by default for common case -->
       <set name="vle" val="1"/>
     </context_set>
   </context_data>
   
-  <!--
-  	TODO: the renamed SPR registers below should be reviewed to 
-  	accurately reflect a particular 32-bit PPC variant or a "common" standard
-  	set of SPR registers found in most variants.
-  -->
   <register_data>
   	<register name="spr000" group="SPR_UNNAMED"/>
   	<register name="XER" group="SPR"/>

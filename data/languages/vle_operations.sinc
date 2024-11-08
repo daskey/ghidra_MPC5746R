@@ -7,19 +7,23 @@
 }
 
 # e_addhus - Add Halfword Unsigned Saturate
-:e_addhus D, A, B is OP=31 & D & A & B & XOP_0_10=0x754
-{
-    local a:2 = A:2;
-    local b:2 = B:2;
-    local sum:2 = a + b;
-    local carry:1 = (sum < a);
-    local result:2 = sum;
-    if (carry != 0) goto <saturate>;
+:e_addhus D, A, B is OP=31 & D & A & B & XOP_0_10=0x754 & Rc=0 {
+    local a;
+    local b;
+    local sum;
+
+    a = A & 0xFFFF;          # Extract lower 16 bits of A
+    b = B & 0xFFFF;          # Extract lower 16 bits of B
+    sum = a + b;             # Sum of a and b
+
+    if (sum > 0xFFFF) goto <saturate>;
+    D = sum;
     goto <done>;
-    <saturate>
-    result = 0xffff;
-    <done>
-    D = zext(result);
+
+<saturate>
+    D = 0xFFFF;
+
+<done>
 }
 
 # e_addwus - Add Word Unsigned
@@ -62,6 +66,5 @@ define pcodeop lbdxOp;
 # binutils: e500mc.d:   68:	7c 01 14 06 	lbdx    r0,r1,r2
 :lbdx RT,A,B is OP=31 & XOP_1_10=515 & RT & A & B & BIT_0=0  { RT = lbdxOp(RT,A,B); }
 
-# Define MPUSYNC Instruction
-:mpusync is OP=0x31 & XOP_0_10=0x46C {
+:mpusync is OP=31 & XOP_0_10=1132 & Rc=0 {
 }
