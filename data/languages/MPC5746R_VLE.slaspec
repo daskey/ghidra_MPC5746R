@@ -4,7 +4,6 @@
 @define ENDIAN "big"
 @define REGISTER_SIZE "4"
 @define EATRUNC "ea"
-@define CTR_OFFSET "32"
 
 @include "ppc_common.sinc"
 @include "ppc_vle.sinc"
@@ -15,3 +14,4 @@
 @include "special_registers.sinc"
 @include "vle_operations.sinc"
 @include "spe_float.sinc"
+@include "system_control.sinc"
