@@ -3,18 +3,22 @@
 define pcodeop max_float;
 define pcodeop min_float;
 
-# efsmin rT,rA,rB      010 1100 1010
+# efsmin - SPE Floating Point Single-Precision Minimum
 :efsmin D,A,B is OP=4 & D & A & B & XOP_0_10=0x2B1
 {
-    local result:4 = min_float(A:4, B:4);
-    D = (D & 0xFFFFFFFF00000000) | zext(result);
+    local a:4 = A;  # SPE float operations work on 32-bit values
+    local b:4 = B;
+    local result:4 = min_float(a, b);
+    D = result;  # Direct result assignment (no masking needed as it's single precision)
     setSummaryFPSCR();
 }
 
-# efsmax rT,rA,rB      010 1100 1011
-:efsmax D,A,B is OP=4 & D & A & B & XOP_0_10=0x2b0
+# efsmax - SPE Floating Point Single-Precision Maximum
+:efsmax D,A,B is OP=4 & D & A & B & XOP_0_10=0x2b0 
 {
-    local result:4 = max_float(A:4, B:4);
-    D = (D & 0xFFFFFFFF00000000) | zext(result);
+    local a:4 = A;  # SPE float operations work on 32-bit values
+    local b:4 = B;
+    local result:4 = max_float(a, b);
+    D = result;  # Direct result assignment
     setSummaryFPSCR();
 }

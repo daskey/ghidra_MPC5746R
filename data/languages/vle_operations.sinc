@@ -2,35 +2,37 @@
 # e_addbus - Add Byte Unsigned
 :e_addbus D, A, B is OP=31 & D & A & B & XOP_0_10=0x7D4
 {
-    local result:1 = (A:1 + B:1) & 0xFF;
+    local a:1 = A:1;
+    local b:1 = B:1;
+    local temp:2 = zext(a) + zext(b); # Do addition in wider type to handle overflow
+    local result:1 = temp:1; # Truncate back to byte
     D = zext(result);
 }
 
 # e_addhus - Add Halfword Unsigned Saturate
-:e_addhus D, A, B is OP=31 & D & A & B & XOP_0_10=0x754 & Rc=0 {
-    local a;
-    local b;
-    local sum;
-
-    a = A & 0xFFFF;          # Extract lower 16 bits of A
-    b = B & 0xFFFF;          # Extract lower 16 bits of B
-    sum = a + b;             # Sum of a and b
-
-    if (sum > 0xFFFF) goto <saturate>;
-    D = sum;
+:e_addhus D, A, B is OP=31 & D & A & B & XOP_0_10=0x754
+{
+    local a:2 = A:2;  # Get 16-bit values
+    local b:2 = B:2;
+    local temp:4 = zext(a) + zext(b);  # Do addition in wider type
+    local result:2;
+    
+    if (temp > 0xffff) goto <saturate>;
+    result = temp:2;
     goto <done>;
-
-<saturate>
-    D = 0xFFFF;
-
-<done>
+    <saturate>
+    result = 0xffff;
+    <done>
+    D = zext(result);
 }
 
 # e_addwus - Add Word Unsigned
 :e_addwus D, A, B is OP=31 & D & A & B & XOP_0_10=0x6D4
 {
-    local result:$(REGISTER_SIZE) = A + B;
-    D = result;
+    local a:4 = A:4;
+    local b:4 = B:4;
+    local result:4 = a + b;
+    D = zext(result);
 }
 
 # e_subfbus - Subtract Byte Unsigned
@@ -38,7 +40,8 @@
 {
     local a:1 = A:1;
     local b:1 = B:1;
-    local result:1 = b - a;
+    local temp:2 = zext(b) - zext(a); # Do subtraction in wider type
+    local result:1 = temp:1;
     D = zext(result);
 }
 
@@ -47,8 +50,11 @@
 {
     local a:2 = A:2;
     local b:2 = B:2;
-    local result:2 = b - a;
+    local temp:4 = zext(b) - zext(a); # Do subtraction in wider type
+    local result:2;
+    
     if (b < a) goto <saturate>;
+    result = temp:2;
     goto <done>;
     <saturate>
     result = 0;
