@@ -214,9 +214,9 @@ IMM16B: val						is IMM_0_10_VLE & IMM_16_20_VLE [ val = (IMM_16_20_VLE << 11) |
 	CRFD = CRFS;
 }
 
-:e_lbz	D,dPlusRaOrZeroAddress	is $(ISVLE) & OP=12 & D & dPlusRaOrZeroAddress
+:e_lbz D,dPlusRaOrZeroAddress is $(ISVLE) & OP=12 & D & dPlusRaOrZeroAddress
 {
-	D = zext(*:1(dPlusRaOrZeroAddress));	
+    D = *:1(dPlusRaOrZeroAddress);    
 }
 
 :se_lbz RZ_VLE,sd4PlusRxAddr	is $(ISVLE) & OP4_VLE=8 & RZ_VLE & sd4PlusRxAddr {
@@ -406,23 +406,24 @@ IMM16B: val						is IMM_0_10_VLE & IMM_16_20_VLE [ val = (IMM_16_20_VLE << 11) |
 # e_stmvsprw 6 (0b0001_10) 0b00001 RA 0b0001_0001 D8
 :e_stmvsprw d8PlusRaOrZeroAddress is $(ISVLE) & OP=6 & d8PlusRaOrZeroAddress & XOP_8_VLE=0x11 & BITS_21_25=1
 {
-	tea = d8PlusRaOrZeroAddress;
-	#TODO  SEE TODO in e_ldmvsprw
-	# storeReg(CR);
-	local tmpCR:4 = 0;
-	tmpCR = tmpCR | (zext(cr0 & 0xf) << 0);
-	tmpCR = tmpCR | (zext(cr1 & 0xf) << 4);
-	tmpCR = tmpCR | (zext(cr2 & 0xf) << 8);
-	tmpCR = tmpCR | (zext(cr3 & 0xf) << 12);
-	tmpCR = tmpCR | (zext(cr4 & 0xf) << 16);
-	tmpCR = tmpCR | (zext(cr5 & 0xf) << 20);
-	tmpCR = tmpCR | (zext(cr6 & 0xf) << 24);
-	tmpCR = tmpCR | (zext(cr7 & 0xf) << 28);
-	*:4 tea = tmpCR;
-	tea = tea + 4;
-	storeReg(LR);
-	storeReg(CTR);
-	storeReg(XER);
+    tea = d8PlusRaOrZeroAddress;
+    #TODO  SEE TODO in e_ldmvsprw
+    # storeReg(CR);
+    local tmpCR:4 = 0;
+    # Ensure consistent 4-byte operations by using zext
+    tmpCR = zext(cr0 & 0xf) |
+            (zext(cr1 & 0xf) << 4) |
+            (zext(cr2 & 0xf) << 8) |
+            (zext(cr3 & 0xf) << 12) |
+            (zext(cr4 & 0xf) << 16) |
+            (zext(cr5 & 0xf) << 20) |
+            (zext(cr6 & 0xf) << 24) |
+            (zext(cr7 & 0xf) << 28);
+    *:4 tea = tmpCR;
+    tea = tea + 4;
+    storeReg(LR);
+    storeReg(CTR);
+    storeReg(XER);
 }
 
 # e_stmvsrrw 6 (0b0001_10) 0b00100 RA 0b0001_0001 D8
@@ -567,9 +568,8 @@ IMM16B: val						is IMM_0_10_VLE & IMM_16_20_VLE [ val = (IMM_16_20_VLE << 11) |
 	RX_VLE = ~RX_VLE + 1;
 }
 
-:se_btsti RX_VLE,OIM5_VLE		is $(ISVLE) & OP6_VLE=25 & BIT9_VLE=1 & RX_VLE & OIM5_VLE {
-	tmp:$(REGISTER_SIZE) = (RX_VLE >> (0x1F - OIM5_VLE)) & 0x1;
-	cr0flags(tmp);
+:se_btsti RX_VLE,OIM5_VLE is $(ISVLE) & OP6_VLE=25 & BIT9_VLE=1 & RX_VLE & OIM5_VLE {
+    cr0flags((RX_VLE >> (0x1F - OIM5_VLE)) & 0x1);
 }
 
 :e_cmp16i. A,SIMM16				is $(ISVLE) & OP=28 & XOP_11_VLE=19 & A & SIMM16 {
@@ -591,10 +591,9 @@ IMM16B: val						is IMM_0_10_VLE & IMM_16_20_VLE [ val = (IMM_16_20_VLE << 11) |
 	cr0 = ((tmpA s< tmpB) << 3) | ((tmpA s> tmpB) << 2) | ((tmpA == tmpB) << 1) | (xer_so & 1);	
 }
 
-:se_cmpi RX_VLE,OIM5_VLE		is $(ISVLE) & OP6_VLE=10 & BIT9_VLE=1 & RX_VLE & OIM5_VLE {
-	tmpA:4 = RX_VLE:4;
-	tmpB:4 = OIM5_VLE;
-	cr0 = ((tmpA s< tmpB) << 3) | ((tmpA s> tmpB) << 2) | ((tmpA == tmpB) << 1) | (xer_so & 1);		
+:se_cmpi RX_VLE,OIM5_VLE is $(ISVLE) & OP6_VLE=10 & BIT9_VLE=1 & RX_VLE & OIM5_VLE {
+    cr0 = ((RX_VLE s< OIM5_VLE) << 3) | ((RX_VLE s> OIM5_VLE) << 2) | 
+          ((RX_VLE == OIM5_VLE) << 1) | (xer_so & 1);        
 }
 
 :e_cmpl16i. A,IMM16				is $(ISVLE) & OP=28 & XOP_11_VLE=21 & A & IMM16 {
@@ -873,10 +872,9 @@ IMM16B: val						is IMM_0_10_VLE & IMM_16_20_VLE [ val = (IMM_16_20_VLE << 11) |
 	cr0flags(A); 				
 }
 
-:se_slwi RX_VLE,OIM5_VLE		is $(ISVLE) & OP6_VLE=27 & BIT9_VLE=0 & RX_VLE & OIM5_VLE {
-	tmpX:4 = RX_VLE:4;
-	tmpX = tmpX << OIM5_VLE;
-	RX_VLE = zext(tmpX);
+:se_slwi RX_VLE,OIM5_VLE is $(ISVLE) & OP6_VLE=27 & BIT9_VLE=0 & RX_VLE & OIM5_VLE {
+    tmpX:4 = RX_VLE;
+    RX_VLE = tmpX << OIM5_VLE;
 }
 
 :se_slw RX_VLE,RY_VLE			is $(ISVLE) & OP6_VLE=16 & BITS_8_9=2 & RX_VLE & RY_VLE {
