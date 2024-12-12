@@ -66,11 +66,5 @@
     # VLE no operation
 }
 
-# binutils-descr: "lbdx",	X(31,515),	X_MASK,      E500MC,	PPCNONE,	{RT, RA, RB}
-define pcodeop lbdxOp;
-# ISA-info: lbdx - Form "X" Page 708 Category "DS"
-# binutils: e500mc.d:   68:	7c 01 14 06 	lbdx    r0,r1,r2
-:lbdx RT,A,B is OP=31 & XOP_1_10=515 & RT & A & B & BIT_0=0  { RT = lbdxOp(RT,A,B); }
-
 :mpusync is OP=31 & XOP_0_10=1132 & Rc=0 {
 }

@@ -1455,8 +1455,6 @@ define pcodeop floatMaddRoundedUp;
 define pcodeop floatMaddOverflow;
 define pcodeop floatMaddUnderflow;
 define pcodeop floatInfinityMulZero;
-define pcodeop floatMin;
-define pcodeop floatMax;
 
 define pcodeop floatMsubInexact;
 define pcodeop floatMsubRoundedUp;

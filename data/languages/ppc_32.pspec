@@ -10,7 +10,7 @@
   
   <context_data>
     <context_set space="ram">
-      <set name="linkreg" val="0"/>
+      <set name="linkreg" val="1"/>
 
       <!-- e200 series uses VLE, with exception of e200z7 which supports both. Enable VLE
            decoding by default for common case -->

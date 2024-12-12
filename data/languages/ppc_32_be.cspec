@@ -79,11 +79,8 @@
         <pentry minsize="1" maxsize="8" metatype="float" extension="float">
           <register name="f1"/>
         </pentry>
-        <pentry minsize="1" maxsize="4" extension="inttype">
+        <pentry minsize="1" maxsize="8" extension="inttype">
           <register name="r3"/>
-        </pentry>
-        <pentry minsize="5" maxsize="8">
-          <addr space="join" piece1="r3" piece2="r4"/>
         </pentry>
       </output>
       <unaffected>
