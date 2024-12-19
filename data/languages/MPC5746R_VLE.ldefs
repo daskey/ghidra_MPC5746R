@@ -7,11 +7,13 @@
             variant="MPC5746R"
             version="1.0"
             slafile="MPC5746R_VLE.sla"
-            processorspec="ppc_32.pspec"
+            processorspec="ppc_64.pspec"
             manualindexfile="../manuals/PowerISA.idx"
             id="PowerPC:BE:64:VLE:MPC5746R">
     <description>PowerPC 32 VLE MPC5746R Microcontroller</description>
     <truncate_space space="ram" size="4"/>
-    <compiler name="default" spec="ppc_32_be.cspec" id="default"/>
+    <compiler name="default" spec="ppc_64_32.cspec" id="default"/>
+    <external_name tool="IDA-PRO" name="ppc"/>
+    <external_name tool="DWARF.register.mapping.file" name="ppc.dwarf"/>
   </language> 
 </language_definitions>

@@ -1,5 +1,4 @@
-# SLA specification file for Power ISA Version 2.06 Revision B (July 23, 2010) 
-# ISA (Instruction Set Architecture) a trademarked name for PowerPC specifications from IBM.
+# SLA specification file for the NXP MPC5746R with the e200z4 core
 
 @define ENDIAN "big"
 
@@ -31,8 +30,6 @@
 @include "SPE_EFSD.sinc"
 @include "SPE_EFV.sinc"
 @include "SPE_FloatMulAdd.sinc"
-# OR
-#@include "altivec.sinc"
 
 @include "special_registers.sinc"
 @include "vle_operations.sinc"
