@@ -9,7 +9,7 @@
             slafile="MPC5746R_VLE.sla"
             processorspec="ppc_64.pspec"
             manualindexfile="../manuals/PowerISA.idx"
-            id="PowerPC:BE:64:VLE:MPC5746R">
+            id="PowerPC:BE:32:VLE:MPC5746R">
     <description>PowerPC 32 VLE MPC5746R Microcontroller</description>
     <truncate_space space="ram" size="4"/>
     <compiler name="default" spec="ppc_64_32.cspec" id="default"/>
