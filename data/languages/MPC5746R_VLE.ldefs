@@ -11,7 +11,6 @@
             manualindexfile="../manuals/PowerISA.idx"
             id="PowerPC:BE:32:VLE:MPC5746R">
     <description>PowerPC 32 VLE MPC5746R Microcontroller</description>
-    <truncate_space space="ram" size="4"/>
     <compiler name="default" spec="ppc_64_32.cspec" id="default"/>
     <external_name tool="IDA-PRO" name="ppc"/>
     <external_name tool="DWARF.register.mapping.file" name="ppc.dwarf"/>
