@@ -111,16 +111,12 @@
         <register name="cr2"/>
         <register name="cr3"/>
         <register name="cr4"/>
-        <register name="cr0"/>
-        <register name="cr1"/>
-        <register name="cr5"/>
-        <register name="cr6"/>
-        <register name="cr7"/>
       </unaffected>
     </prototype>
   </default_proto>
 
   <callfixup name="get_pc_thunk_lr">
+    <target name="__get_pc_thunk_lr"/>
     <pcode>
       <body><![CDATA[
       LR = inst_dest + 4;
