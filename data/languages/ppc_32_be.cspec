@@ -119,7 +119,7 @@
     <target name="__get_pc_thunk_lr"/>
     <pcode>
       <body><![CDATA[
-      LR = inst_dest + 4;
+      LR = inst_next;
       ]]></body>
     </pcode>
   </callfixup>
