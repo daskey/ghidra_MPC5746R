@@ -1,3 +1,0 @@
-:se_nop      is OP=1 & XOP_0_5=0x00 {
-    # SE no operation
-}
