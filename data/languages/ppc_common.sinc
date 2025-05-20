@@ -1455,6 +1455,8 @@ define pcodeop floatMaddRoundedUp;
 define pcodeop floatMaddOverflow;
 define pcodeop floatMaddUnderflow;
 define pcodeop floatInfinityMulZero;
+define pcodeop floatMin;
+define pcodeop floatMax;
 
 define pcodeop floatMsubInexact;
 define pcodeop floatMsubRoundedUp;
@@ -1824,10 +1826,10 @@ macro unpackFPSCR(tmp) {
 REL_ABS: "a"	is AA = 1 {}
 REL_ABS:			is AA = 0 {}
 
-addressLI: reloc is vle=0 & LI & AA=0  [ reloc = inst_start + LI*4;] { export *[ram]:4 reloc; }
-addressLI: reloc 	is vle=0 & LI & AA=1		[ reloc = LI*4; ]				{ export *[ram]:4 reloc; }
-addressBD: reloc		is vle=0 & BD & AA=0		[ reloc = inst_start + BD*4; ]	{ export *[ram]:4 reloc; }
-addressBD: reloc		is vle=0 & BD & AA=1		[ reloc = BD*4; ]				{ export *[ram]:4 reloc; }
+addressLI: reloc		is LI & AA=0 	[ reloc = inst_start + LI*4;] 	{ export *[ram]:4 reloc; }
+addressLI: reloc 	is LI & AA=1		[ reloc = LI*4; ]				{ export *[ram]:4 reloc; }
+addressBD: reloc		is BD & AA=0		[ reloc = inst_start + BD*4; ]	{ export *[ram]:4 reloc; }
+addressBD: reloc		is BD & AA=1		[ reloc = BD*4; ]				{ export *[ram]:4 reloc; }
 
 OFF16SH: val		is D0 & D1 & D2 [ val = ((D0 << 6) | (D1 << 1) | D2) << 16; ] { export *[const]:4 val;}
 

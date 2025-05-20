@@ -1,0 +1,20 @@
+# SPE Floating Point Instructions
+
+define pcodeop max_float;
+define pcodeop min_float;
+
+# efsmin rT,rA,rB      010 1100 1010
+:efsmin D,A,B is OP=4 & D & A & B & XOP_0_10=0x2B1
+{
+    local result:4 = min_float(A:4, B:4);
+    D = (D & 0xFFFFFFFF00000000) | zext(result);
+    setSummaryFPSCR();
+}
+
+# efsmax rT,rA,rB      010 1100 1011
+:efsmax D,A,B is OP=4 & D & A & B & XOP_0_10=0x2b0
+{
+    local result:4 = max_float(A:4, B:4);
+    D = (D & 0xFFFFFFFF00000000) | zext(result);
+    setSummaryFPSCR();
+}

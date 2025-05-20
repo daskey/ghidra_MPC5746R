@@ -1,3 +1,4 @@
+
 # Additional SPE Instructions for Devices that Support VLE
 # Freescale engineering bulletin EB689
 # https://www.nxp.com/docs/en/engineering-bulletin/EB689.pdf
@@ -13,171 +14,98 @@
 # - Floating-Point Single-Precision Negative Multiply-Substract
 
 
-
 # evfsmadd rD,rA,rB
 # Vector Floating-Point Single-Precision Multiply-Add
 :evfsmadd D,A,B is OP=4 & D & A & B & XOP_0_10=0x282
 {
-    tmpD = D;
-    tmpA = A;
-    tmpB = B;
-    tmpD = ((tmpA f* tmpB) f+ tmpD);
-    D = tmpD;
+    local tmpAL:4 = A & 0xFFFFFFFF;
+    local tmpAH:4 = (A >> 16) & 0xFFFFFFFF;
+    local tmpBL:4 = B & 0xFFFFFFFF;
+    local tmpBH:4 = (B >> 16) & 0xFFFFFFFF;
+    local tmpDL:4 = D & 0xFFFFFFFF;
+    local tmpDH:4 = (D >> 16) & 0xFFFFFFFF;
+
+    tmpDL = ((tmpAL f* tmpBL) f+ tmpDL);
+    tmpDH = ((tmpAH f* tmpBH) f+ tmpDH);
+    D = (tmpDH << 16) | tmpDL;
 }
 
 # evfsmsub rD,rA,rB
 # Vector Floating-Point Single-Precision Multiply-Substract
 :evfsmsub D,A,B is OP=4 & D & A & B & XOP_0_10=0x283
 {
-    tmpD = D;
-    tmpA = A;
-    tmpB = B;
-    tmpD = ((tmpA f* tmpB) f- tmpD);
-    D = tmpD;
+    local tmpAL:4 = A & 0xFFFFFFFF;
+    local tmpAH:4 = (A >> 16) & 0xFFFFFFFF;
+    local tmpBL:4 = B & 0xFFFFFFFF;
+    local tmpBH:4 = (B >> 16) & 0xFFFFFFFF;
+    local tmpDL:4 = D & 0xFFFFFFFF;
+    local tmpDH:4 = (D >> 16) & 0xFFFFFFFF;
+
+    tmpDL = ((tmpAL f* tmpBL) f- tmpDL);
+    tmpDH = ((tmpAH f* tmpBH) f- tmpDH);
+    D = (tmpDH << 16) | tmpDL;
 }
 
 # evfsnmadd
 # Vector Floating-Point Single-Precision Negative Multiply-Add
 :evfsnmadd D,A,B is OP=4 & D & A & B & XOP_0_10=0x28A
 {
-    tmpD = D;
-    tmpA = A;
-    tmpB = B;
-    tmpD = f- ((tmpA f* tmpB) f+ tmpD);
-    D = tmpD;
+    local tmpAL:4 = A & 0xFFFFFFFF;
+    local tmpAH:4 = (A >> 16) & 0xFFFFFFFF;
+    local tmpBL:4 = B & 0xFFFFFFFF;
+    local tmpBH:4 = (B >> 16) & 0xFFFFFFFF;
+    local tmpDL:4 = D & 0xFFFFFFFF;
+    local tmpDH:4 = (D >> 16) & 0xFFFFFFFF;
+
+    tmpDL = f- ((tmpAL f* tmpBL) f+ tmpDL);
+    tmpDH = f- ((tmpAH f* tmpBH) f+ tmpDH);
+    D = (tmpDH << 16) | tmpDL;
 }
 
 # evfsnmsub
 # Vector Floating-Point Single-Precision Negative Multiply-Substract
 :evfsnmsub D,A,B is OP=4 & D & A & B & XOP_0_10=0x28B
 {
-    tmpD = D;
-    tmpA = A;
-    tmpB = B;
-    tmpD = f- ((tmpA f* tmpB) f- tmpD);
-    D = tmpD;
+    local tmpAL:4 = A & 0xFFFFFFFF;
+    local tmpAH:4 = (A >> 16) & 0xFFFFFFFF;
+    local tmpBL:4 = B & 0xFFFFFFFF;
+    local tmpBH:4 = (B >> 16) & 0xFFFFFFFF;
+    local tmpDL:4 = D & 0xFFFFFFFF;
+    local tmpDH:4 = (D >> 16) & 0xFFFFFFFF;
+
+    tmpDL = f- ((tmpAL f* tmpBL) f- tmpDL);
+    tmpDH = f- ((tmpAH f* tmpBH) f- tmpDH);
+    D = (tmpDH << 16) | tmpDL;
 }
 
 # efsmadd rD,rA,rB
 # Floating-Point Single-Precision Multiply-Add
 :efsmadd D,A,B is OP=4 & D & A & B & XOP_0_10=0x2C2
 {
-	local lo:4 = (A:4 f* B:4) f+ D:4;
-	D = (D & 0xFFFFFFFF00000000) | zext(lo);
+    local lo:4 = (A & 0xFFFFFFFF) f* (B & 0xFFFFFFFF) f+ (D & 0xFFFFFFFF);
+    D = (D & 0xFFFF0000) | (lo & 0xFFFF);
 }
 
 # efsmsub rD,rA,rB
 # Floating-Point Single-Precision Multiply-Substract
 :efsmsub D,A,B is OP=4 & D & A & B & XOP_0_10=0x2C3
 {
-	local lo:4 = (A:4 f* B:4) f- D:4;
-	D = (D & 0xFFFFFFFF00000000) | zext(lo);
+    local lo:4 = (A & 0xFFFFFFFF) f* (B & 0xFFFFFFFF) f- (D & 0xFFFFFFFF);
+    D = (D & 0xFFFF0000) | (lo & 0xFFFF);
 }
 
 # efsnmadd rD,rA,rB
 # Floating-Point Single-Precision Negative Multiply-Add
 :efsnmadd D,A,B is OP=4 & D & A & B & XOP_0_10=0x2CA
 {
-	local lo:4 = f- ((A:4 f* B:4) f+ D:4);
-	D = (D & 0xFFFFFFFF00000000) | zext(lo);
+    local lo:4 = f- ((A & 0xFFFFFFFF) f* (B & 0xFFFFFFFF) f+ (D & 0xFFFFFFFF));
+    D = (D & 0xFFFF0000) | (lo & 0xFFFF);
 }
 
 # efsnmsub rD,rA,rB
 # Floating-Point Single-Precision Negative Multiply-Substract
 :efsnmsub D,A,B is OP=4 & D & A & B & XOP_0_10=0x2CB
 {
-	local lo:4 = f- ((A:4 f* B:4) f- D:4);
-	D = (D & 0xFFFFFFFF00000000) | zext(lo);
-}
-
-# VLE Arithmetic Instructions
-# e_addbus - Add Byte Unsigned
-:e_addbus D, A, B is OP=31 & D & A & B & XOP_0_10=0x7D4
-{
-    local a:1 = A:1;
-    local b:1 = B:1;
-    local temp:2 = zext(a) + zext(b); # Do addition in wider type to handle overflow
-    local result:1 = temp:1; # Truncate back to byte
-    D = zext(result);
-}
-
-# e_addhus - Add Halfword Unsigned Saturate
-:e_addhus D, A, B is OP=31 & D & A & B & XOP_0_10=0x754
-{
-    local a:2 = A:2;  # Get 16-bit values
-    local b:2 = B:2;
-    local temp:4 = zext(a) + zext(b);  # Do addition in wider type
-    local result:2;
-    
-    if (temp > 0xffff) goto <saturate>;
-    result = temp:2;
-    goto <done>;
-    <saturate>
-    result = 0xffff;
-    <done>
-    D = zext(result);
-}
-
-# e_addwus - Add Word Unsigned
-:e_addwus D, A, B is OP=31 & D & A & B & XOP_0_10=0x6D4
-{
-    local a:4 = A:4;
-    local b:4 = B:4;
-    local result:4 = a + b;
-    D = zext(result);
-}
-
-# e_subfbus - Subtract Byte Unsigned
-:e_subfbus D, A, B is OP=31 & D & A & B & XOP_0_10=0x7d0
-{
-    local a:1 = A:1;
-    local b:1 = B:1;
-    local temp:2 = zext(b) - zext(a); # Do subtraction in wider type
-    local result:1 = temp:1;
-    D = zext(result);
-}
-
-# e_subfhus - Subtract Halfword Unsigned Saturate
-:e_subfhus D, A, B is OP=31 & D & A & B & XOP_0_10=0x750
-{
-    local a:2 = A:2;
-    local b:2 = B:2;
-    local temp:4 = zext(b) - zext(a); # Do subtraction in wider type
-    local result:2;
-    
-    if (b < a) goto <saturate>;
-    result = temp:2;
-    goto <done>;
-    <saturate>
-    result = 0;
-    <done>
-    D = zext(result);
-}
-
-:e_nop       is OP=4 & XOP_0_10=0x000 {
-    # VLE no operation
-}
-
-:mpusync is OP=31 & XOP_0_10=1132 & Rc=0 {
-}
-
-# SPE Floating Point Instructions
-
-define pcodeop max_float;
-define pcodeop min_float;
-
-# efsmin - SPE Floating Point Single-Precision Minimum
-:efsmin D,A,B is OP=4 & D & A & B & XOP_0_10=0x2B1
-{
-    local lo:4 = min_float(A:4, B:4);
-    D = (D & 0xFFFFFFFF00000000) | zext(lo);
-    setSummaryFPSCR();
-}
-
-# efsmax - SPE Floating Point Single-Precision Maximum
-:efsmax D,A,B is OP=4 & D & A & B & XOP_0_10=0x2b0 
-{
-    local lo:4 = max_float(A:4, B:4);
-    D = (D & 0xFFFFFFFF00000000) | zext(lo);
-    setSummaryFPSCR();
+    local lo:4 = f- ((A & 0xFFFFFFFF) f* (B & 0xFFFFFFFF) f- (D & 0xFFFFFFFF));
+    D = (D & 0xFFFF0000) | (lo & 0xFFFF);
 }
