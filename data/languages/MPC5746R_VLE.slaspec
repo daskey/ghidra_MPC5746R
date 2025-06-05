@@ -8,10 +8,6 @@
 @include "ppc_common.sinc"
 @include "ppc_vle.sinc"
 @include "evx.sinc"
-@include "quicciii.sinc"
 @include "SPE_FloatMulAdd.sinc"
 
-@include "special_registers.sinc"
-@include "vle_operations.sinc"
 @include "spe_float.sinc"
-@include "system_control.sinc"

@@ -12,5 +12,7 @@
             id="PowerPC:BE:32:VLE:MPC5746R">
     <description>PowerPC 32 VLE MPC5746R Microcontroller</description>
     <compiler name="default" spec="ppc_32_be.cspec" id="default"/>
+    <external_name tool="IDA-PRO" name="ppc"/>
+    <external_name tool="DWARF.register.mapping.file" name="ppc.dwarf"/>
   </language> 
 </language_definitions>
