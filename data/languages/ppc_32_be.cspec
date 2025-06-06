@@ -78,7 +78,7 @@
   <callfixup name="get_pc_thunk_lr">
     <pcode>
       <body><![CDATA[
-      LR = inst_dest + 4;
+      LR = inst_dest + 2;
       ]]></body>
     </pcode>
   </callfixup>
