@@ -5,14 +5,17 @@
     <property key="addressesDoNotAppearDirectlyInCode" value="true"/>
     <property key="emulateInstructionStateModifierClass" value="ghidra.program.emulation.PPCEmulateInstructionStateModifier"/>
     <property key="assemblyRating:PowerPC:BE:32:e200z4" value="PLATINUM"/>
+    <property key="assemblyRating:PowerPC:BE:32:VLE:MPC5746R" value="PLATINUM"/>
+    <property key="assemblyRating:PowerPC:BE:32:VLE:e200z425n3" value="PLATINUM"/>
   </properties>
   <programcounter register="pc"/>
   
   <context_data>
     <context_set space="ram">
       <set name="linkreg" val="0"/>
-      <!-- e200z4 uses VLE by default -->
+      <!-- e200z425n3 uses VLE by default -->
       <set name="vle" val="1"/>
+      <!-- e200z425n3 has SPE enabled by default -->
     </context_set>
   </context_data>
   
@@ -140,6 +143,25 @@
   	<register name="spr3f5" rename="BUCSR" group="SPR"/>   <!-- SPR 1013 -->
   	<register name="spr3f7" rename="MMUCFG" group="SPR"/>  <!-- SPR 1015 -->
   	<register name="spr3ff" rename="SVR" group="SPR"/>     <!-- SPR 1023 -->
+  	
+  	<!-- e200z425n3 Additional Debug Features -->
+  	<register name="spr137" rename="DBCR4" group="SPR"/>   <!-- SPR 311 -->
+  	<register name="spr23d" rename="DEVENT" group="SPR"/>  <!-- SPR 573 -->
+  	<register name="spr238" rename="DDAM" group="SPR"/>    <!-- SPR 568 -->
+  	
+  	<!-- e200z425n3 Performance Monitor Registers -->
+  	<register name="spr208" rename="PMC0" group="SPR"/>    <!-- SPR 520 -->
+  	<register name="spr209" rename="PMC1" group="SPR"/>    <!-- SPR 521 -->
+  	<register name="spr20a" rename="PMC2" group="SPR"/>    <!-- SPR 522 -->
+  	<register name="spr20b" rename="PMC3" group="SPR"/>    <!-- SPR 523 -->
+  	<register name="spr230" rename="PMGC0" group="SPR"/>   <!-- SPR 560 -->
+  	
+  	<!-- e200z425n3 Additional IVORs -->
+  	<register name="spr213" rename="IVOR35" group="SPR"/>  <!-- SPR 531 -->
+  	<register name="spr21c" rename="IVOR36" group="SPR"/>  <!-- SPR 540 -->
+  	<register name="spr21d" rename="IVOR37" group="SPR"/>  <!-- SPR 541 -->
+  	<register name="spr21e" rename="IVOR38" group="SPR"/>  <!-- SPR 542 -->
+  	<register name="spr21f" rename="IVOR39" group="SPR"/>  <!-- SPR 543 -->
   </register_data>
   
 </processor_spec>

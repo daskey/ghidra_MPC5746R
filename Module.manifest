@@ -1,0 +1,27 @@
+MODULE FILE LICENSE: lib/licenses/LICENSE
+MODULE FILE LICENSE: Apache License 2.0
+
+data/languages/MPC5746R_VLE.ldefs||GHIDRA||||END|
+data/languages/MPC5746R_VLE.slaspec||GHIDRA||||END|
+data/languages/ppc_32.pspec||GHIDRA||||END|
+data/languages/ppc_32_be.cspec||GHIDRA||||END|
+data/languages/ppc.dwarf||GHIDRA||||END|
+data/languages/e200z425n3_cache.sinc||GHIDRA||||END|
+data/languages/e200z425n3_spe_simple.sinc||GHIDRA||||END|
+data/languages/SPE_FloatMulAdd.sinc||GHIDRA||||END|
+data/languages/evx.sinc||GHIDRA||||END|
+data/languages/spe_float.sinc||GHIDRA||||END|
+data/languages/ppc_common.sinc||GHIDRA||||END|
+data/languages/ppc_vle.sinc||GHIDRA||||END|
+data/languages/ppc_embedded.sinc||GHIDRA||||END|
+data/languages/ppc_instructions.sinc||GHIDRA||||END|
+data/languages/Scalar_SPFP.sinc||GHIDRA||||END|
+data/languages/lmwInstructions.sinc||GHIDRA||||END|
+data/languages/lswInstructions.sinc||GHIDRA||||END|
+data/languages/mulhwInstructions.sinc||GHIDRA||||END|
+data/languages/stmwInstructions.sinc||GHIDRA||||END|
+data/languages/stswiInstructions.sinc||GHIDRA||||END|
+data/languages/MPC5746R.opinion||GHIDRA||||END|
+data/languages/MPC5746R_memory.map||GHIDRA||||END|
+data/manuals/PowerISA.idx||GHIDRA||||END|
+data/manuals/PowerPC.idx||GHIDRA||||END|

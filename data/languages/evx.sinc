@@ -20,12 +20,18 @@ define pcodeop vectorShiftRightWordUnsigned;
 
 :evmergehi S,A,B        is OP=4 & S & A & B & XOP_0_10=556
 {
-    vectorMergeHigh(S,A,B);
+    # Merge high words: S = A[32:63] || B[32:63]
+    local tmpA:4 = (A >> 32) & 0xFFFFFFFF;
+    local tmpB:4 = (B >> 32) & 0xFFFFFFFF;
+    S = (zext(tmpA) << 32) | zext(tmpB);
 }
 
 :evmergelo S,A,B        is OP=4 & S & A & B & XOP_0_10=557
 {
-    vectorMergeLow(S,A,B);
+    # Merge low words: S = A[0:31] || B[0:31] 
+    local tmpA:4 = A & 0xFFFFFFFF;
+    local tmpB:4 = B & 0xFFFFFFFF;
+    S = (zext(tmpA) << 32) | zext(tmpB);
 }
 
 

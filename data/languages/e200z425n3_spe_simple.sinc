@@ -1,0 +1,106 @@
+# e200z425n3 Enhanced SPE Instructions (Simplified)
+# Additional SPE instructions specific to e200z425n3 core
+
+# Enhanced vector compare operations
+define pcodeop vectorCompareGreaterThanUnsigned;
+define pcodeop vectorCompareGreaterThanSigned;
+define pcodeop vectorCompareEqual;
+
+# Enhanced Vector Compare Greater Than Unsigned Word
+:evbtstgt S,A,B is OP=4 & S & A & B & XOP_0_10=0x265
+{
+    # Compare vector elements A > B (unsigned)
+    local tmpAL:4 = A & 0xFFFFFFFF;
+    local tmpAH:4 = (A >> 32) & 0xFFFFFFFF;
+    local tmpBL:4 = B & 0xFFFFFFFF;
+    local tmpBH:4 = (B >> 32) & 0xFFFFFFFF;
+    
+    local resL:4 = 0;
+    local resH:4 = 0;
+    
+    if (tmpAL > tmpBL) goto <setL>;
+    goto <testH>;
+    <setL>
+    resL = 0xFFFFFFFF;
+    
+    <testH>
+    if (tmpAH > tmpBH) goto <setH>;
+    goto <done>;
+    <setH>
+    resH = 0xFFFFFFFF;
+    
+    <done>
+    S = (zext(resH) << 32) | zext(resL);
+}
+
+# Enhanced Vector Compare Greater Than Signed Word
+:evbtstgts S,A,B is OP=4 & S & A & B & XOP_0_10=0x266
+{
+    # Compare vector elements A > B (signed)
+    local tmpAL:4 = A & 0xFFFFFFFF;
+    local tmpAH:4 = (A >> 32) & 0xFFFFFFFF;
+    local tmpBL:4 = B & 0xFFFFFFFF;
+    local tmpBH:4 = (B >> 32) & 0xFFFFFFFF;
+    
+    local resL:4 = 0;
+    local resH:4 = 0;
+    
+    if (tmpAL s> tmpBL) goto <setL>;
+    goto <testH>;
+    <setL>
+    resL = 0xFFFFFFFF;
+    
+    <testH>
+    if (tmpAH s> tmpBH) goto <setH>;
+    goto <done>;
+    <setH>
+    resH = 0xFFFFFFFF;
+    
+    <done>
+    S = (zext(resH) << 32) | zext(resL);
+}
+
+# Enhanced Vector Compare Equal Word
+:evbtsteq S,A,B is OP=4 & S & A & B & XOP_0_10=0x267
+{
+    # Compare vector elements A == B
+    local tmpAL:4 = A & 0xFFFFFFFF;
+    local tmpAH:4 = (A >> 32) & 0xFFFFFFFF;
+    local tmpBL:4 = B & 0xFFFFFFFF;
+    local tmpBH:4 = (B >> 32) & 0xFFFFFFFF;
+    
+    local resL:4 = 0;
+    local resH:4 = 0;
+    
+    if (tmpAL == tmpBL) goto <setL>;
+    goto <testH>;
+    <setL>
+    resL = 0xFFFFFFFF;
+    
+    <testH>
+    if (tmpAH == tmpBH) goto <setH>;
+    goto <done>;
+    <setH>
+    resH = 0xFFFFFFFF;
+    
+    <done>
+    S = (zext(resH) << 32) | zext(resL);
+}
+
+# e200z425n3 specific bit manipulation instructions
+define pcodeop countLeadingZeros;
+
+# Count Leading Zeros Word
+:cntlzw RA,S is OP=31 & RA & S & XOP_1_10=26 & BIT_0=0
+{
+    # Count leading zeros in word
+    RA = countLeadingZeros(S & 0xFFFFFFFF);
+}
+
+# Count Leading Zeros Word with Dot
+:cntlzw. RA,S is OP=31 & RA & S & XOP_1_10=26 & BIT_0=1
+{
+    # Count leading zeros in word and set CR0
+    RA = countLeadingZeros(S & 0xFFFFFFFF);
+    cr0flags(RA);
+}

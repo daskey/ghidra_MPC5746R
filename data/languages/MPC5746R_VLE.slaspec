@@ -1,5 +1,6 @@
-# SLA specification file for IBM PowerPC e200 series core
-# Note: e200 series use VLE, with exception of e200z7 which supports both VLE and non-VLE
+# SLA specification file for NXP MPC5746R e200z425n3 core
+# e200z425n3 core with VLE (Variable Length Encoding) support
+# Includes SPE (Signal Processing Engine) instructions
 
 @define ENDIAN "big"
 @define REGISTER_SIZE "4"
@@ -9,5 +10,8 @@
 @include "ppc_vle.sinc"
 @include "evx.sinc"
 @include "SPE_FloatMulAdd.sinc"
-
 @include "spe_float.sinc"
+
+# e200z425n3 core specific instructions
+@include "e200z425n3_cache.sinc"
+@include "e200z425n3_spe_simple.sinc"
