@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<language_definitions>
+  <language processor="PowerPC"
+            endian="big"
+            size="32"
+            variant="e200z425n3"
+            version="2.0"
+            slafile="e200z425n3.sla"
+            processorspec="e200z425n3.pspec"
+            manualindexfile="../manuals/PowerPC.idx"
+            id="PowerPC:BE:32:VLE:MPC5746R">
+    <description>e200z425n3 processor</description>
+    <compiler name="default" spec="e200z425n3.cspec" id="default"/>
+        <external_name tool="gnu" name="powerpc:e200"/>
+    <external_name tool="IDA-PRO" name="ppc"/>
+    <external_name tool="DWARF.register.mapping.file" name="ppc.dwarf"/>
+  </language>
+</language_definitions>

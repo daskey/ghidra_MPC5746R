@@ -1,11 +1,11 @@
-SLEIGH = ../../../support/sleigh
+SLEIGH = "E:\ghidra_11.3.1_PUBLIC\support\sleigh.bat"
 
 .PHONY: all clean
 
-all: data/languages/ppc_32_vle_mpc5746r
+all: data/languages/e200z425n3.sla
 
-data/languages/MPC5746R_VLE.sla: data/languages/MPC5746R_VLE.slaspec $(wildcard data/languages/*.sinc)
-	$(SLEIGH) data/languages/MPC5746R_VLE.slaspec
+data/languages/e200z425n3.sla: data/languages/e200z425n3.slaspec $(wildcard data/languages/*.sinc)
+	$(SLEIGH) "E:\ghidra_11.3.1_PUBLIC\Ghidra\Extensions\e200z425n3\data\languages\e200z425n3.slaspec"
 
 clean:
-	rm -r data/languages/*.sla
+	rm -f data/languages/*.sla
