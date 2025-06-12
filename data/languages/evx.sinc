@@ -1,4 +1,3 @@
-
 @include "Scalar_SPFP.sinc"
 @ifdef IS_ISA
 @include "SPE_APU.sinc"
@@ -12,6 +11,12 @@ define pcodeop vectorStoreDoubleOfDoubleIndexed;
 define pcodeop initializeAccumulator;
 define pcodeop vectorShiftRightWordSigned;
 define pcodeop vectorShiftRightWordUnsigned;
+define pcodeop vectorDotProductHalfWordsHighComplexConjugateSignedSaturateFloat;
+define pcodeop vectorDotProductHalfWordsHighComplexConjugateSignedSaturateFloatAccumulateWord3;
+define pcodeop vectorDotProductHalfWordsLowComplexConjugateSignedSaturateInteger;
+define pcodeop vectorDotProductHalfWordsLowComplexConjugateSignedSaturateIntegerAccumulateWord;
+define pcodeop vectorSetEqualWord;
+define pcodeop vectorSetGreaterThanWordSigned;
 
 :evxor vrD_64_0,vrA_64_0,vrB_64_0        is OP=4 & vrD_64_0 & vrA_64_0 & vrB_64_0 & XOP_0_10=534
 {
@@ -128,6 +133,36 @@ define pcodeop vectorShiftRightWordUnsigned;
 {
     ea:$(REGISTER_SIZE) = RA_OR_ZERO + RB;
     *:16 ($(EATRUNC)) = vrS;
+}
+
+:evdotphihcssf D,A,B        is OP=4 & D & A & B & XOP_0_10=258
+{
+    D = vectorDotProductHalfWordsHighComplexConjugateSignedSaturateFloat(A, B);
+}
+
+:evdotphihcssfaaw3 D,A,B    is OP=4 & D & A & B & XOP_0_10=274
+{
+    D = vectorDotProductHalfWordsHighComplexConjugateSignedSaturateFloatAccumulateWord3(A, B);
+}
+
+:evdotplohcssi D,A,B        is OP=4 & D & A & B & XOP_0_10=257
+{
+    D = vectorDotProductHalfWordsLowComplexConjugateSignedSaturateInteger(A, B);
+}
+
+:evdotplohcssiaaw D,A,B     is OP=4 & D & A & B & XOP_0_10=305
+{
+    D = vectorDotProductHalfWordsLowComplexConjugateSignedSaturateIntegerAccumulateWord(A, B);
+}
+
+:evseteqw D,A,B             is OP=4 & D & A & B & XOP_0_10=516
+{
+    D = vectorSetEqualWord(A, B);
+}
+
+:evsetgtws D,A,B            is OP=4 & D & A & B & XOP_0_10=526
+{
+    D = vectorSetGreaterThanWordSigned(A, B);
 }
 
 

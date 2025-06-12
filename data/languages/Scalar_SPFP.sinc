@@ -4,8 +4,22 @@
 # There are three versions of e500 core, namely e500v1, the e500v2, and the e500mc.
 # A 64-bit evolution of the e500mc core is called e5500 core.
 # All PowerQUICC 85xx devices are based on e500v1 or e500v2 cores.
-define pcodeop max_float;
-define pcodeop min_float;
+
+# Helper macro for floating-point max operation
+macro fmax(result, a, b) {
+    result = a;
+    if (b f<= a) goto <done>;
+    result = b;
+    <done>
+}
+
+# Helper macro for floating-point min operation  
+macro fmin(result, a, b) {
+    result = a;
+    if (b f>= a) goto <done>;
+    result = b;
+    <done>
+}
 # =================================================================
 # Page 408
 # efsabs rT,rA         010 1100 0100
@@ -345,15 +359,13 @@ define pcodeop ConvertFloatingPointFromUnsignedFraction;
 # efsmin rT,rA,rB      010 1100 1010
 :efsmin D,A,B is OP=4 & D & A & B & XOP_0_10=0x2B1
 {
-    local result:4 = min_float(A, B);
-    D = result;
+    fmin(D, A, B);
     setSummaryFPSCR();
 }
 # efsmax rT,rA,rB      010 1100 1011
 :efsmax D,A,B is OP=4 & D & A & B & XOP_0_10=0x2b0
 {
-    local result:4 = max_float(A, B);
-    D = result;
+    fmax(D, A, B);
     setSummaryFPSCR();
 }
 
