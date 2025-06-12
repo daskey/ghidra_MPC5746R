@@ -11,6 +11,7 @@ macro fmax(result, a, b) {
     if (b f<= a) goto <done>;
     result = b;
     <done>
+    setFPRF(result);
 }
 
 # Helper macro for floating-point min operation  
@@ -19,6 +20,7 @@ macro fmin(result, a, b) {
     if (b f>= a) goto <done>;
     result = b;
     <done>
+    setFPRF(result);
 }
 # =================================================================
 # Page 408
@@ -337,13 +339,11 @@ define pcodeop ConvertFloatingPointFromUnsignedFraction;
    setSummaryFPSCR();
 }
 # efststeq CRFD,rA,rB        010 1101 1110
-#define pcodeop FloatingPointTestEqual;
 :efststeq CRFD,A,B is OP=4 & CRFD & A & B & XOP_0_10=0x2DE & BITS_21_22=0
 {
   CRFD[2,1] = A f== B;
 }
 # efststgt CRFD,rA,rB        010 1101 1100
-#define pcodeop FloatingPointTestGreaterThan;
 :efststgt CRFD,A,B is OP=4 & CRFD & A & B & XOP_0_10=0x2DC & BITS_21_22=0
 {
   CRFD[2,1] = A f> B;
@@ -351,7 +351,6 @@ define pcodeop ConvertFloatingPointFromUnsignedFraction;
 # =================================================================
 # Page 430
 # efststlt CRFD,rA,rB        010 1101 1101
-#define pcodeop FloatingPointTestLessThan;
 :efststlt CRFD,A,B is OP=4 & CRFD & A & B & XOP_0_10=0x2DD & BITS_21_22=0
 {
   CRFD[2,1] = A f< B;
