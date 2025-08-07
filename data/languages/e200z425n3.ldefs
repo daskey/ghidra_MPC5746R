@@ -11,7 +11,7 @@
             id="PowerPC:BE:32:VLE:MPC5746R">
     <description>e200z425n3 processor</description>
     <compiler name="default" spec="e200z425n3.cspec" id="default"/>
-        <external_name tool="gnu" name="powerpc:e200"/>
+        <external_name tool="gnu" name="powerpc:common"/>
     <external_name tool="IDA-PRO" name="ppc"/>
     <external_name tool="DWARF.register.mapping.file" name="ppc.dwarf"/>
   </language>

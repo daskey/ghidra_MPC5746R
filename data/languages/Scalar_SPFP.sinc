@@ -399,7 +399,12 @@ define pcodeop ConvertFloatingPointFromUnsignedFraction;
 define pcodeop lbdxOp;
 # ISA-info: lbdx - Form "X" Page 708 Category "DS"
 # binutils: e500mc.d:   68:    7c 01 14 06     lbdx    r0,r1,r2
-:lbdx RT,A,B is OP=31 & XOP_1_10=515 & RT & A & B & BIT_0=0  { RT = lbdxOp(RT,A,B); }
+:lbdx RT,A,B is OP=31 & XOP_1_10=515 & RT & A & B & BIT_0=0  { 
+	# lbdxOp - Load Byte with Device Synchronization
+	# Used for hardware semaphores/atomic operations
+	local ea:$(REGISTER_SIZE) = A + B;
+	RT = zext(*[ram]:1 ea);
+}
 
 :mpusync is OP=31 & XOP_0_10=1132 & Rc=0 {
 }

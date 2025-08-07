@@ -70,53 +70,47 @@ IMM16B: val						is IMM_0_10_VLE & IMM_16_20_VLE [ val = (IMM_16_20_VLE << 11) |
 # We use extended mnemonics so the display is understandable without having to cross-
 # reference multiple tables.
 :e_b^CC32 BI_CR_VLE, addrBD15			 is $(ISVLE) & OP=30 & XOP_VLE=8 & LK=0 & addrBD15 & BIT_L=0 & BI_CR_VLE & CC32 {
-	if (CC32 == 0) goto inst_next;
-	goto addrBD15;
+	if (CC32) goto addrBD15;
 }
 
 :e_b^CC32^"l" BI_CR_VLE, addrBD15		 is $(ISVLE) & OP=30 & XOP_VLE=8 & LK=1 & addrBD15 & BIT_L=0 & BI_CR_VLE & CC32 {
 	if (CC32 == 0) goto inst_next;
-	LR= inst_next;
-	call [addrBD15];
+	LR = inst_next;
+	call addrBD15;
 }
 
 :e_b^CC32 addrBD15			 is $(ISVLE) & OP=30 & XOP_VLE=8 & LK=0 & addrBD15 & BIT_L=1 & CC32 {
-	if (CC32 == 0) goto inst_next;
-	goto addrBD15;
+	if (CC32) goto addrBD15;
 }
 
 :e_b^CC32^"l" addrBD15		 is $(ISVLE) & OP=30 & XOP_VLE=8 & LK=1 & addrBD15 & BIT_L=1 & CC32 {
 	if (CC32 == 0) goto inst_next;
-	LR= inst_next;
-	call [addrBD15];
+	LR = inst_next;
+	call addrBD15;
 }
 
 :se_b^CC16 cr0, addrBD8			 is $(ISVLE) & OP5_VLE=28 & addrBD8 & cr0 & CC16 {
-	if (CC16 == 0) goto inst_next;
-	goto addrBD8;
+	if (CC16) goto addrBD8;
 }
 #######
 
 :se_bctr					 is $(ISVLE) & OP15_VLE=3 & LK0_VLE=0 {
-	tmp:$(REGISTER_SIZE) = CTR & ~1;
-	goto [tmp];	
+	goto [CTR];	
 }
 
 :se_bctrl					 is $(ISVLE) & OP15_VLE=3 & LK0_VLE=1 {
 	LR = inst_next;	
-	tmp:$(REGISTER_SIZE) = CTR & ~1;
-	call [tmp];	
+	call [CTR];	
 }
 
 :se_blr						 is $(ISVLE) & OP15_VLE=2 & LK0_VLE=0 {
-	tmp:$(REGISTER_SIZE) = LR & ~1;
-	return [tmp];			
+	return [LR];			
 }
 
 :se_blrl					 is $(ISVLE) & OP15_VLE=2 & LK0_VLE=1 {	
-	tmp:$(REGISTER_SIZE) = LR & ~1;
+	tmp:$(REGISTER_SIZE) = LR;
 	LR = inst_next;
-	return [tmp];			
+	call [tmp];			
 }
 
 :se_sc						 is $(ISVLE) & OP16_VLE=2 {
@@ -135,7 +129,9 @@ IMM16B: val						is IMM_0_10_VLE & IMM_16_20_VLE [ val = (IMM_16_20_VLE << 11) |
 }
 
 :se_illegal					 is $(ISVLE) & OP16_VLE=0 {
-	illegal();
+	# illegal();
+	# Illegal instruction - should trap
+	local illegal_marker:1 = 0xFF;
 }
 
 :se_rfmci					 is $(ISVLE) & OP16_VLE=11 {
@@ -294,6 +290,15 @@ IMM16B: val						is IMM_0_10_VLE & IMM_16_20_VLE [ val = (IMM_16_20_VLE << 11) |
 	loadReg(SRR1);
 }
 
+# e_ldmvsrrw variant with BITS_21_25=7
+:e_ldmvsrrw d8PlusRaOrZeroAddress is $(ISVLE) & OP=6 & d8PlusRaOrZeroAddress & XOP_8_VLE=0x10 & BITS_21_25=7
+{
+	tea = d8PlusRaOrZeroAddress;
+	loadReg(SRR0);
+	loadReg(SRR1);
+}
+
+
 :e_lha	D,dPlusRaOrZeroAddress	is $(ISVLE) & OP=14 & D & dPlusRaOrZeroAddress
 {
 	D = sext(*:2(dPlusRaOrZeroAddress));	
@@ -433,6 +438,16 @@ IMM16B: val						is IMM_0_10_VLE & IMM_16_20_VLE [ val = (IMM_16_20_VLE << 11) |
 	storeReg(SRR1);
 }
 
+# e_stmvsrrw variant with BITS_21_25=7
+:e_stmvsrrw d8PlusRaOrZeroAddress is $(ISVLE) & OP=6 & d8PlusRaOrZeroAddress & XOP_8_VLE=0x11 & BITS_21_25=7
+{
+	tea = d8PlusRaOrZeroAddress;
+	storeReg(SRR0);
+	storeReg(SRR1);
+}
+
+
+
 :e_stw S,dPlusRaOrZeroAddress	is $(ISVLE) & OP=21 & S & dPlusRaOrZeroAddress
 {
 @ifdef BIT_64
@@ -501,6 +516,7 @@ IMM16B: val						is IMM_0_10_VLE & IMM_16_20_VLE [ val = (IMM_16_20_VLE << 11) |
 	D = A + SCALE;
 	cr0flags(D); 
 }
+
 
 :se_addi RX_VLE,OIMM		 is $(ISVLE) & OP6_VLE=8 & BIT9_VLE=0 & RX_VLE & OIMM {
 	RX_VLE = RX_VLE + OIMM;
@@ -944,7 +960,10 @@ IMM16B: val						is IMM_0_10_VLE & IMM_16_20_VLE [ val = (IMM_16_20_VLE << 11) |
 }
 
 :se_isync					 is $(ISVLE) & OP16_VLE=1 {
-	instructionSynchronize();
+	# Emulation-friendly version: instruction synchronization
+	# instructionSynchronize();
+	local isync_marker:1 = 1;
+	# Pipeline flush point
 }
 
 # VLE Arithmetic Instructions
@@ -975,11 +994,33 @@ IMM16B: val						is IMM_0_10_VLE & IMM_16_20_VLE [ val = (IMM_16_20_VLE << 11) |
 <done>
 }
 
-# e_addwus - Add Word Unsigned
+# e_addwus - Add Word Unsigned Saturate
+# Two variants found in binary with different XOP values:
+# - XOP=0x2D4 at 0x090868b0: 7c 07 02 d4
+# - XOP=0x6D4 at 0x08fdd062: 7c a4 2e d4
+# Both perform saturating addition for counter increments
+:e_addwus D, A, B is OP=31 & D & A & B & XOP_0_10=0x2D4
+{
+    local result:$(REGISTER_SIZE) = A + B;
+    # Saturate at 0xFFFFFFFF if overflow
+    if (result < A) goto <saturate>;
+    D = result;
+    goto <done>;
+    <saturate>
+    D = 0xFFFFFFFF;
+    <done>
+}
+
 :e_addwus D, A, B is OP=31 & D & A & B & XOP_0_10=0x6D4
 {
     local result:$(REGISTER_SIZE) = A + B;
+    # Saturate at 0xFFFFFFFF if overflow
+    if (result < A) goto <saturate>;
     D = result;
+    goto <done>;
+    <saturate>
+    D = 0xFFFFFFFF;
+    <done>
 }
 
 # e_subfbus - Subtract Byte Unsigned

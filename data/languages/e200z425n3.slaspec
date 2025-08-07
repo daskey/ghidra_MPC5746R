@@ -13,3 +13,4 @@
 @include "evx.sinc"
 @include "quicciii.sinc"
 @include "SPE_FloatMulAdd.sinc"
+@include "ppc_emulation_helpers.sinc"

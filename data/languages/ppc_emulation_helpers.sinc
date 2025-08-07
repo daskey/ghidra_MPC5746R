@@ -1,0 +1,47 @@
+# PowerPC Emulation Helper Implementations
+# This file provides additional helper macros for analysis and emulation
+#
+# Note: Most PowerPC-specific operations are already defined as pcodeops in:
+# - ppc_common.sinc (WriteExternalEnableImmediate, returnFrom*Interrupt, etc.)
+# - ppc_embedded.sinc (memoryBarrier)
+# - Scalar_SPFP.sinc (lbdxOp)
+#
+# For true emulation of these operations, use Ghidra's emulation callbacks API
+# or modify the original pcodeop definitions to be macros.
+
+# Helper macro for atomic operations (for analysis, not true atomicity)
+macro atomic_test_and_set(result, addr) {
+    result = *[ram]:1 addr;
+    *[ram]:1 addr = 1;
+}
+
+# Helper for tracking MSR state changes
+macro update_msr_ee(value) {
+    # Track External Interrupt Enable state
+    # This would be used by analysis tools
+    local ee_state:1 = value & 1;
+}
+
+# Simple synchronization marker for analysis
+macro sync_marker() {
+    local sync_point:1 = 1;
+}
+
+# Analysis helper for marking critical sections
+macro enter_critical_section() {
+    local critical_start:1 = 1;
+}
+
+macro exit_critical_section() {
+    local critical_end:1 = 1;
+}
+
+# Helper for semaphore analysis
+macro semaphore_acquire(sem_addr) {
+    local sem_val:1 = *[ram]:1 sem_addr;
+    *[ram]:1 sem_addr = 1;
+}
+
+macro semaphore_release(sem_addr) {
+    *[ram]:1 sem_addr = 0;
+}

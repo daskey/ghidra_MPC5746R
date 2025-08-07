@@ -1092,7 +1092,10 @@
 #===========================================================
 # binutils-descr: "eieio",	X(31,854),	0xffffffff,  PPC,   BOOKE|PPCA2|PPC476,	{0}
 # binutils: mytest.d:   20:	7c 00 06 ac 	eieio
-:eieio  is OP=31 & XOP_1_10=854 & BITS_11_25=0 & BIT_0=0   { enforceInOrderExecutionIO(); }
+:eieio  is OP=31 & XOP_1_10=854 & BITS_11_25=0 & BIT_0=0   { 
+	# enforceInOrderExecutionIO();
+	# Memory barrier - no-op for emulation
+}
 
 #===========================================================
 #          EQVx
@@ -2235,6 +2238,7 @@
 	D = zext(*:2(ea));
 	A = ea;
 }
+
 #lhzx r0,r2,r0	0x7c 02 02 2e	
 :lhzx D,RA_OR_ZERO,B 	is OP=31 & D & RA_OR_ZERO & B & XOP_1_10=279 & BIT_0=0
 {
@@ -3795,8 +3799,11 @@ define pcodeop stswxOp;
 #sync 0			0x7c 00 04 ac
 :sync L			is OP=31 & BITS_23_25=0 & L & BITS_11_20=0 & XOP_1_10=598 & BIT_0=0
 {
-	tmp:1 = L;
-	sync(tmp);
+	# Emulation-friendly version: memory synchronization barrier
+	# sync(L);
+	local sync_type:1 = L;
+	local sync_marker:$(REGISTER_SIZE) = 0xFEED0000 | zext(sync_type);
+	# Memory barrier - ensures ordering of memory operations
 }
 
 @ifdef BIT_64

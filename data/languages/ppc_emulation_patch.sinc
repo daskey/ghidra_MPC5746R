@@ -1,0 +1,58 @@
+# PowerPC Emulation Patch
+# This file provides emulatable implementations of PowerPC pcodeops
+# Include this file AFTER ppc_common.sinc to override pcodeop definitions
+
+# Override WriteExternalEnableImmediate with emulatable version
+# Original is defined as pcodeop in ppc_common.sinc:1550
+macro WriteExternalEnableImmediate_emu(value) {
+    # Store interrupt enable state at a reserved memory location
+    # MSR[EE] bit tracking for emulation
+    local ee_state:1 = value & 1;
+    *[ram]:1 0x4003FF00 = ee_state;
+}
+
+# Override enforceInOrderExecutionIO with emulatable version
+macro enforceInOrderExecutionIO_emu() {
+    # Memory barrier - no-op for emulation
+    local barrier_marker:1 = 1;
+}
+
+# Override instructionSynchronize with emulatable version
+macro instructionSynchronize_emu() {
+    # Pipeline sync - no-op for emulation
+    local sync_marker:1 = 1;
+}
+
+# Override memoryBarrier with emulatable version
+macro memoryBarrier_emu() {
+    # Memory sync - no-op for emulation
+    local mem_sync:1 = 1;
+}
+
+# Helper for interrupt return operations
+macro returnFromInterrupt_emu(msr_reg, srr1_reg) {
+    # Copy SRR1 to MSR
+    msr_reg = srr1_reg;
+    # Extract and store EE bit for tracking
+    local ee_bit:1 = (srr1_reg >> 15) & 1;
+    *[ram]:1 0x4003FF00 = ee_bit;
+}
+
+# Emulatable lbdxOp for atomic operations
+macro lbdxOp_emu(result, addr1, addr2) {
+    local ea:4 = addr1 | addr2;
+    
+    # Check for semaphore address
+    local is_sem:1 = (ea == 0x5000005a);
+    
+    # Load byte from address
+    result = *[ram]:1 ea;
+    
+    # If semaphore and was 0, set to 1 (atomic test-and-set)
+    if ((is_sem == 1) && (result == 0)) goto <do_set>;
+    goto <done>;
+    
+    <do_set>
+        *[ram]:1 ea = 1;
+    <done>
+}

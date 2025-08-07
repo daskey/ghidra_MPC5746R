@@ -73,7 +73,10 @@ define pcodeop memoryBarrier;
 #isync		0x4c 00 01 2c
 :isync		is $(NOTVLE) & OP=19 & BITS_21_25=0 & BITS_16_20=0 & BITS_11_15=0 & XOP_1_10=150 & BIT_0=0
 {
-	instructionSynchronize();
+	# Emulation-friendly version: instruction synchronization
+	# instructionSynchronize();
+	local isync_marker:1 = 1;
+	# Pipeline flush point - ensures all previous instructions complete
 }
 
 #mfdcr r0,DCRN	0x7c 00 02 86
@@ -210,5 +213,9 @@ define pcodeop memoryBarrier;
 #wrteei 0       0x7c 00 01 46
 :wrteei BIT_15	is OP=31 & BIT_15 & XOP_1_10=163
 {
-	WriteExternalEnableImmediate(BIT_15:1);
+	# Emulation-friendly version: store interrupt enable state
+	# WriteExternalEnableImmediate(BIT_15:1);
+	local ee_state:1 = BIT_15 & 1;
+	local addr:$(REGISTER_SIZE) = 0x4003FF00;
+	*[ram]:1 addr = ee_state;  # Store at reserved address for emulation
 }

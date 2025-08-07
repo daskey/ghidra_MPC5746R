@@ -8,6 +8,19 @@
   </properties>
   <programcounter register="pc"/>
   
+  <!-- PowerPC EABI Register Usage:
+       r1 = Stack Pointer (SP) - must be 16-byte aligned
+       r2 = Small Data Area 2 base (SDA2) - for read-only data
+       r13 = Small Data Area base (SDA) - for read/write small globals
+       r3-r10 = Parameter passing and return values
+       r14-r31 = Callee-saved (non-volatile)
+       r0,r11,r12 = Volatile scratch registers
+       LR = Link Register (return address)
+       CTR = Count Register (volatile)
+       CR2-CR4 = Non-volatile condition fields
+       CR0,CR1,CR5-CR7 = Volatile condition fields
+  -->
+  
   <context_data>
     <context_set space="ram">
       <set name="linkreg" val="0"/>
@@ -576,10 +589,10 @@
   	<register name="spr205" group="SPR_UNNAMED"/>
   	<register name="spr206" group="SPR_UNNAMED"/>
   	<register name="spr207" group="SPR_UNNAMED"/>
-  	<register name="spr208" group="SPR_UNNAMED"/>
-  	<register name="spr209" group="SPR_UNNAMED"/>
-  	<register name="spr20a" group="SPR_UNNAMED"/>
-  	<register name="spr20b" group="SPR_UNNAMED"/>
+  	<register name="spr208" rename="IVOR32" group="SPR"/>
+  	<register name="spr209" rename="IVOR33" group="SPR"/>
+  	<register name="spr20a" rename="IVOR34" group="SPR"/>
+  	<register name="spr20b" rename="IVOR35" group="SPR"/>
   	<register name="spr20c" group="SPR_UNNAMED"/>
   	<register name="spr20d" group="SPR_UNNAMED"/>
   	<register name="spr20e" group="SPR_UNNAMED"/>
@@ -670,10 +683,10 @@
   	<register name="spr25e" group="SPR_UNNAMED"/>
   	<register name="spr25f" group="SPR_UNNAMED"/>
   	
-  	<register name="spr260" group="SPR_UNNAMED"/>
-  	<register name="spr261" group="SPR_UNNAMED"/>
-  	<register name="spr262" group="SPR_UNNAMED"/>
-  	<register name="spr263" group="SPR_UNNAMED"/>
+  	<register name="spr260" rename="PMC0" group="SPR"/>
+  	<register name="spr261" rename="PMC1" group="SPR"/>
+  	<register name="spr262" rename="PMC2" group="SPR"/>
+  	<register name="spr263" rename="PMC3" group="SPR"/>
   	<register name="spr264" group="SPR_UNNAMED"/>
   	<register name="spr265" group="SPR_UNNAMED"/>
   	<register name="spr266" group="SPR_UNNAMED"/>
@@ -687,12 +700,12 @@
   	<register name="spr26e" group="SPR_UNNAMED"/>
   	<register name="spr26f" group="SPR_UNNAMED"/>
   	
-	<register name="spr270" group="SPR_UNNAMED"/>
-  	<register name="spr271" group="SPR_UNNAMED"/>
-  	<register name="spr272" group="SPR_UNNAMED"/>
-  	<register name="spr273" group="SPR_UNNAMED"/>
-  	<register name="spr274" group="SPR_UNNAMED"/>
-  	<register name="spr275" group="SPR_UNNAMED"/>
+	<register name="spr270" rename="MAS0" group="SPR"/>
+  	<register name="spr271" rename="MAS1" group="SPR"/>
+  	<register name="spr272" rename="MAS2" group="SPR"/>
+  	<register name="spr273" rename="MAS3" group="SPR"/>
+  	<register name="spr274" rename="MAS4" group="SPR"/>
+  	<register name="spr275" rename="MAS6" group="SPR"/>
 	<register name="spr276" rename="DPDR" group="SPR"/>
 	<register name="spr277" rename="DPIR" group="SPR"/>
 	<register name="spr278" group="SPR_UNNAMED"/>
@@ -1156,71 +1169,6 @@
 	<register name="dcr040" rename="EXISR" group="DCR"/>
 	
 	<register name="dcr0a0" rename="IOCR" group="DCR"/>
-
-        <register name="vs0" group = "VSX" vector_lane_sizes="1,2,4"/>
-        <register name="vs1" group = "VSX" vector_lane_sizes="1,2,4"/>
-        <register name="vs2" group = "VSX" vector_lane_sizes="1,2,4"/>
-        <register name="vs3" group = "VSX" vector_lane_sizes="1,2,4"/>
-        <register name="vs4" group = "VSX" vector_lane_sizes="1,2,4"/>
-        <register name="vs5" group = "VSX" vector_lane_sizes="1,2,4"/>
-        <register name="vs6" group = "VSX" vector_lane_sizes="1,2,4"/>
-        <register name="vs7" group = "VSX" vector_lane_sizes="1,2,4"/>
-        <register name="vs8" group = "VSX" vector_lane_sizes="1,2,4"/>
-        <register name="vs9" group = "VSX" vector_lane_sizes="1,2,4"/>
-        <register name="vs10" group = "VSX" vector_lane_sizes="1,2,4"/>
-        <register name="vs11" group = "VSX" vector_lane_sizes="1,2,4"/>
-        <register name="vs12" group = "VSX" vector_lane_sizes="1,2,4"/>
-        <register name="vs13" group = "VSX" vector_lane_sizes="1,2,4"/>
-        <register name="vs14" group = "VSX" vector_lane_sizes="1,2,4"/>
-        <register name="vs15" group = "VSX" vector_lane_sizes="1,2,4"/>
-        <register name="vs16" group = "VSX" vector_lane_sizes="1,2,4"/>
-        <register name="vs17" group = "VSX" vector_lane_sizes="1,2,4"/>
-        <register name="vs18" group = "VSX" vector_lane_sizes="1,2,4"/>
-        <register name="vs19" group = "VSX" vector_lane_sizes="1,2,4"/>
-        <register name="vs20" group = "VSX" vector_lane_sizes="1,2,4"/>
-        <register name="vs21" group = "VSX" vector_lane_sizes="1,2,4"/>
-        <register name="vs22" group = "VSX" vector_lane_sizes="1,2,4"/>
-        <register name="vs23" group = "VSX" vector_lane_sizes="1,2,4"/>
-        <register name="vs24" group = "VSX" vector_lane_sizes="1,2,4"/>
-        <register name="vs25" group = "VSX" vector_lane_sizes="1,2,4"/>
-        <register name="vs26" group = "VSX" vector_lane_sizes="1,2,4"/>
-        <register name="vs27" group = "VSX" vector_lane_sizes="1,2,4"/>
-        <register name="vs28" group = "VSX" vector_lane_sizes="1,2,4"/>
-        <register name="vs29" group = "VSX" vector_lane_sizes="1,2,4"/>
-        <register name="vs30" group = "VSX" vector_lane_sizes="1,2,4"/>
-        <register name="vs31" group = "VSX" vector_lane_sizes="1,2,4"/>
-        <register name="vs32" group = "VSX" vector_lane_sizes="1,2,4"/>
-        <register name="vs33" group = "VSX" vector_lane_sizes="1,2,4"/>
-        <register name="vs34" group = "VSX" vector_lane_sizes="1,2,4"/>
-        <register name="vs35" group = "VSX" vector_lane_sizes="1,2,4"/>
-        <register name="vs36" group = "VSX" vector_lane_sizes="1,2,4"/>
-        <register name="vs37" group = "VSX" vector_lane_sizes="1,2,4"/>
-        <register name="vs38" group = "VSX" vector_lane_sizes="1,2,4"/>
-        <register name="vs39" group = "VSX" vector_lane_sizes="1,2,4"/>
-        <register name="vs40" group = "VSX" vector_lane_sizes="1,2,4"/>
-        <register name="vs41" group = "VSX" vector_lane_sizes="1,2,4"/>
-        <register name="vs42" group = "VSX" vector_lane_sizes="1,2,4"/>
-        <register name="vs43" group = "VSX" vector_lane_sizes="1,2,4"/>
-        <register name="vs44" group = "VSX" vector_lane_sizes="1,2,4"/>
-        <register name="vs45" group = "VSX" vector_lane_sizes="1,2,4"/>
-        <register name="vs46" group = "VSX" vector_lane_sizes="1,2,4"/>
-        <register name="vs47" group = "VSX" vector_lane_sizes="1,2,4"/>
-        <register name="vs48" group = "VSX" vector_lane_sizes="1,2,4"/>
-        <register name="vs49" group = "VSX" vector_lane_sizes="1,2,4"/>
-        <register name="vs50" group = "VSX" vector_lane_sizes="1,2,4"/>
-        <register name="vs51" group = "VSX" vector_lane_sizes="1,2,4"/>
-        <register name="vs52" group = "VSX" vector_lane_sizes="1,2,4"/>
-        <register name="vs53" group = "VSX" vector_lane_sizes="1,2,4"/>
-        <register name="vs54" group = "VSX" vector_lane_sizes="1,2,4"/>
-        <register name="vs55" group = "VSX" vector_lane_sizes="1,2,4"/>
-        <register name="vs56" group = "VSX" vector_lane_sizes="1,2,4"/>
-        <register name="vs57" group = "VSX" vector_lane_sizes="1,2,4"/>
-        <register name="vs58" group = "VSX" vector_lane_sizes="1,2,4"/>
-        <register name="vs59" group = "VSX" vector_lane_sizes="1,2,4"/>
-        <register name="vs60" group = "VSX" vector_lane_sizes="1,2,4"/>
-        <register name="vs61" group = "VSX" vector_lane_sizes="1,2,4"/>
-        <register name="vs62" group = "VSX" vector_lane_sizes="1,2,4"/>
-        <register name="vs63" group = "VSX" vector_lane_sizes="1,2,4"/>
 	
   </register_data>
   

@@ -1,37 +1,39 @@
 <?xml version="1.0" encoding="UTF-8"?>
 
 <compiler_spec>
-  <data_organization>
-    <absolute_max_alignment value="0"/>
-    <machine_alignment value="4"/>
-    <default_alignment value="1"/>
-    <default_pointer_alignment value="4"/>
-    <pointer_size value="4"/>
-    <wchar_size value="4"/>
-    <short_size value="2"/>
-    <integer_size value="4"/>
-    <long_size value="4"/>
-    <long_long_size value="8"/>
-    <float_size value="4"/>
-    <double_size value="8"/>
-    <long_double_size value="8"/>
-    <size_alignment_map>
-      <entry size="1" alignment="1"/>
-      <entry size="2" alignment="2"/>
-      <entry size="4" alignment="4"/>
-      <entry size="8" alignment="8"/>
-    </size_alignment_map>
-  </data_organization>
-  
   <global>
     <range space="ram"/>
   </global>
-  
   <stackpointer register="r1" space="ram"/>
-  
   <default_proto>
-    <prototype name="__stdcall" extrapop="0" stackshift="0">
+    <prototype name="__eabi" extrapop="0" stackshift="0">
       <input pointermax="8">
+        <!-- Floating-point args: floats (4 bytes) -->
+        <pentry minsize="4" maxsize="4" metatype="float" extension="float">
+          <register name="f1"/>
+        </pentry>
+        <pentry minsize="4" maxsize="4" metatype="float" extension="float">
+          <register name="f2"/>
+        </pentry>
+        <pentry minsize="4" maxsize="4" metatype="float" extension="float">
+          <register name="f3"/>
+        </pentry>
+        <pentry minsize="4" maxsize="4" metatype="float" extension="float">
+          <register name="f4"/>
+        </pentry>
+        <pentry minsize="4" maxsize="4" metatype="float" extension="float">
+          <register name="f5"/>
+        </pentry>
+        <pentry minsize="4" maxsize="4" metatype="float" extension="float">
+          <register name="f6"/>
+        </pentry>
+        <pentry minsize="4" maxsize="4" metatype="float" extension="float">
+          <register name="f7"/>
+        </pentry>
+        <pentry minsize="4" maxsize="4" metatype="float" extension="float">
+          <register name="f8"/>
+        </pentry>
+        <!-- Integer/pointer args -->
         <pentry minsize="1" maxsize="4">
           <register name="r3"/>
         </pentry>
@@ -56,22 +58,30 @@
         <pentry minsize="1" maxsize="4">
           <register name="r10"/>
         </pentry>
+        <!-- Stacked args -->
         <pentry minsize="1" maxsize="500" align="4">
           <addr offset="8" space="stack"/>
         </pentry>
       </input>
       <output>
+        <!-- Float return -->
+        <pentry minsize="4" maxsize="4" metatype="float" extension="float">
+          <register name="f1"/>
+        </pentry>
+        <!-- Integer return -->
         <pentry minsize="1" maxsize="4" extension="inttype">
           <register name="r3"/>
         </pentry>
+        <!-- 64-bit return (using r3:r4 pair) -->
         <pentry minsize="5" maxsize="8">
           <addr space="join" piece1="r3" piece2="r4"/>
         </pentry>
       </output>
       <unaffected>
-        <register name="r1"/>  <!-- Stack pointer -->
-        <register name="r2"/>  <!-- Small data area 2 pointer (_SDA2_BASE_) -->
-        <register name="r13"/> <!-- Small data area base pointer (_SDA_BASE_) -->
+        <!-- Callee-saved GPRs & SDA pointers -->
+        <register name="r1"/>   <!-- Stack pointer -->
+        <register name="r2"/>   <!-- SDA2 base -->
+        <register name="r13"/>  <!-- SDA base -->
         <register name="r14"/>
         <register name="r15"/>
         <register name="r16"/>
@@ -90,15 +100,78 @@
         <register name="r29"/>
         <register name="r30"/>
         <register name="r31"/>
+        <!-- Callee-saved CR fields -->
+        <register name="cr2"/>
+        <register name="cr3"/>
         <register name="cr4"/>
+        <!-- Callee-saved FPRs -->
+        <register name="f14"/>
+        <register name="f15"/>
+        <register name="f16"/>
+        <register name="f17"/>
+        <register name="f18"/>
+        <register name="f19"/>
+        <register name="f20"/>
+        <register name="f21"/>
+        <register name="f22"/>
+        <register name="f23"/>
+        <register name="f24"/>
+        <register name="f25"/>
+        <register name="f26"/>
+        <register name="f27"/>
+        <register name="f28"/>
+        <register name="f29"/>
+        <register name="f30"/>
+        <register name="f31"/>
       </unaffected>
+      <killedbycall>
+        <!-- Volatile GPRs -->
+        <register name="r0"/>
+        <register name="r3"/>
+        <register name="r4"/>
+        <register name="r5"/>
+        <register name="r6"/>
+        <register name="r7"/>
+        <register name="r8"/>
+        <register name="r9"/>
+        <register name="r10"/>
+        <register name="r11"/>
+        <register name="r12"/>
+        <!-- Volatile special regs -->
+        <register name="lr"/>
+        <register name="ctr"/>
+        <register name="xer"/>
+        <!-- Volatile CR fields -->
+        <register name="cr0"/>
+        <register name="cr1"/>
+        <register name="cr5"/>
+        <register name="cr6"/>
+        <register name="cr7"/>
+        <!-- Volatile FPRs -->
+        <register name="f0"/>
+        <register name="f1"/>
+        <register name="f2"/>
+        <register name="f3"/>
+        <register name="f4"/>
+        <register name="f5"/>
+        <register name="f6"/>
+        <register name="f7"/>
+        <register name="f8"/>
+        <register name="f9"/>
+        <register name="f10"/>
+        <register name="f11"/>
+        <register name="f12"/>
+        <register name="f13"/>
+        <!-- SPE accumulator -->
+        <register name="ACC"/>
+      </killedbycall>
     </prototype>
   </default_proto>
-  
+
   <callfixup name="get_pc_thunk_lr">
     <pcode>
       <body><![CDATA[
-      LR = inst_next;
+      LR = inst_dest + 2;
       ]]></body>
     </pcode>
   </callfixup>
