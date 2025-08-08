@@ -1012,21 +1012,19 @@ IMM16B: val						is IMM_0_10_VLE & IMM_16_20_VLE [ val = (IMM_16_20_VLE << 11) |
 <done>
 }
 
-# e_addwus - Add Word Unsigned Saturate
-# Two variants found in binary with different XOP values:
-# - XOP=0x2D4 at 0x090868b0: 7c 07 02 d4
-# - XOP=0x6D4 at 0x08fdd062: 7c a4 2e d4
-# Both perform saturating addition for counter increments
-:e_addwus D, A, B is OP=31 & D & A & B & XOP_0_10=0x2D4
+:e_addwss D, A, B is OP=31 & D & A & B & XOP_0_10=0x2D4
 {
     local result:$(REGISTER_SIZE) = A + B;
-    # Saturate at 0xFFFFFFFF if overflow
-    if (result < A) goto <saturate>;
+    if (A > 0 && B > 0 && result < 0) goto <saturate_pos>;
+    if (A < 0 && B < 0 && result >= 0) goto <saturate_neg>;
     D = result;
     goto <done>;
-    <saturate>
-    D = 0xFFFFFFFF;
-    <done>
+  <saturate_pos>
+    D = 0x7FFFFFFF;
+    goto <done>;
+  <saturate_neg>
+    D = 0x80000000;
+  <done>
 }
 
 :e_addwus D, A, B is OP=31 & D & A & B & XOP_0_10=0x6D4
