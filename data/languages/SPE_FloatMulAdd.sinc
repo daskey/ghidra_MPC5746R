@@ -1,0 +1,117 @@
+
+# Additional SPE Instructions for Devices that Support VLE
+# Freescale engineering bulletin EB689
+# https://www.nxp.com/docs/en/engineering-bulletin/EB689.pdf
+
+# additional SPE instructions that are implemented on devices with an e200z3 or e200z6 core that supports VLE
+# - Vector Floating-Point Single-Precision Multiply-Add
+# - Vector Floating-Point Single-Precision Multiply-Substract
+# - Vector Floating-Point Single-Precision Negative Multiply-Add
+# - Vector Floating-Point Single-Precision Negative Multiply-Substract
+# - Floating-Point Single-Precision Multiply-Add
+# - Floating-Point Single-Precision Multiply-Substract
+# - Floating-Point Single-Precision Negative Multiply-Add
+# - Floating-Point Single-Precision Negative Multiply-Substract
+
+
+
+# evfsmadd rD,rA,rB
+# Vector Floating-Point Single-Precision Multiply-Add
+:evfsmadd D,A,B is OP=4 & D & A & B & XOP_0_10=0x282
+{
+	local tmpAL:$(HREGSIZE) = A:$(HREGSIZE); local tmpAH:$(HREGSIZE) = A[$(HREGBITS),$(HREGBITS)];
+	local tmpBL:$(HREGSIZE) = B:$(HREGSIZE); local tmpBH:$(HREGSIZE) = B[$(HREGBITS),$(HREGBITS)];
+	local tmpDL:$(HREGSIZE) = D:$(HREGSIZE); local tmpDH:$(HREGSIZE) = D[$(HREGBITS),$(HREGBITS)];
+
+	tmpDL = ((tmpAL f* tmpBL) f+ tmpDL);
+	tmpDH = ((tmpAH f* tmpBH) f+ tmpDH);
+	D = (zext(tmpDH) << $(HREGBITS)) | zext(tmpDL);
+}
+
+# evfsmsub rD,rA,rB
+# Vector Floating-Point Single-Precision Multiply-Substract
+:evfsmsub D,A,B is OP=4 & D & A & B & XOP_0_10=0x283
+{
+	local tmpAL:$(HREGSIZE) = A:$(HREGSIZE); local tmpAH:$(HREGSIZE) = A[$(HREGBITS),$(HREGBITS)];
+	local tmpBL:$(HREGSIZE) = B:$(HREGSIZE); local tmpBH:$(HREGSIZE) = B[$(HREGBITS),$(HREGBITS)];
+	local tmpDL:$(HREGSIZE) = D:$(HREGSIZE); local tmpDH:$(HREGSIZE) = D[$(HREGBITS),$(HREGBITS)];
+
+	tmpDL = ((tmpAL f* tmpBL) f- tmpDL);
+	tmpDH = ((tmpAH f* tmpBH) f- tmpDH);
+	D = (zext(tmpDH) << $(HREGBITS)) | zext(tmpDL);
+}
+
+# evfsnmadd
+# Vector Floating-Point Single-Precision Negative Multiply-Add
+:evfsnmadd D,A,B is OP=4 & D & A & B & XOP_0_10=0x28A
+{
+	local tmpAL:$(HREGSIZE) = A:$(HREGSIZE); local tmpAH:$(HREGSIZE) = A[$(HREGBITS),$(HREGBITS)];
+	local tmpBL:$(HREGSIZE) = B:$(HREGSIZE); local tmpBH:$(HREGSIZE) = B[$(HREGBITS),$(HREGBITS)];
+	local tmpDL:$(HREGSIZE) = D:$(HREGSIZE); local tmpDH:$(HREGSIZE) = D[$(HREGBITS),$(HREGBITS)];
+
+	tmpDL = f- ((tmpAL f* tmpBL) f+ tmpDL);
+	tmpDH = f- ((tmpAH f* tmpBH) f+ tmpDH);
+	D = (zext(tmpDH) << $(HREGBITS)) | zext(tmpDL);
+}
+
+# evfsnmsub
+# Vector Floating-Point Single-Precision Negative Multiply-Substract
+:evfsnmsub D,A,B is OP=4 & D & A & B & XOP_0_10=0x28B
+{
+	local tmpAL:$(HREGSIZE) = A:$(HREGSIZE); local tmpAH:$(HREGSIZE) = A[$(HREGBITS),$(HREGBITS)];
+	local tmpBL:$(HREGSIZE) = B:$(HREGSIZE); local tmpBH:$(HREGSIZE) = B[$(HREGBITS),$(HREGBITS)];
+	local tmpDL:$(HREGSIZE) = D:$(HREGSIZE); local tmpDH:$(HREGSIZE) = D[$(HREGBITS),$(HREGBITS)];
+
+	tmpDL = f- ((tmpAL f* tmpBL) f- tmpDL);
+	tmpDH = f- ((tmpAH f* tmpBH) f- tmpDH);
+	D = (zext(tmpDH) << $(HREGBITS)) | zext(tmpDL);
+}
+
+# efsmadd rD,rA,rB
+# Floating-Point Single-Precision Multiply-Add
+:efsmadd D,A,B is OP=4 & D & A & B & XOP_0_10=0x2C2
+{
+	local lo:$(HREGSIZE) = (A:$(HREGSIZE) f* B:$(HREGSIZE)) f+ D:$(HREGSIZE);
+@if REGISTER_SIZE == "4"
+	D = (D & 0xFFFF0000) | zext(lo);
+@else
+	D = (D & 0xFFFFFFFF00000000) | zext(lo);
+@endif
+}
+
+# efsmsub rD,rA,rB
+# Floating-Point Single-Precision Multiply-Substract
+:efsmsub D,A,B is OP=4 & D & A & B & XOP_0_10=0x2C3
+{
+	local lo:$(HREGSIZE) = (A:$(HREGSIZE) f* B:$(HREGSIZE)) f- D:$(HREGSIZE);
+@if REGISTER_SIZE == "4"
+	D = (D & 0xFFFF0000) | zext(lo);
+@else
+	D = (D & 0xFFFFFFFF00000000) | zext(lo);
+@endif
+}
+
+# efsnmadd rD,rA,rB
+# Floating-Point Single-Precision Negative Multiply-Add
+:efsnmadd D,A,B is OP=4 & D & A & B & XOP_0_10=0x2CA
+{
+	local lo:$(HREGSIZE) = f- ((A:$(HREGSIZE) f* B:$(HREGSIZE)) f+ D:$(HREGSIZE));
+@if REGISTER_SIZE == "4"
+	D = (D & 0xFFFF0000) | zext(lo);
+@else
+	D = (D & 0xFFFFFFFF00000000) | zext(lo);
+@endif
+}
+
+# efsnmsub rD,rA,rB
+# Floating-Point Single-Precision Negative Multiply-Substract
+:efsnmsub D,A,B is OP=4 & D & A & B & XOP_0_10=0x2CB
+{
+	local lo:$(HREGSIZE) = f- ((A:$(HREGSIZE) f* B:$(HREGSIZE)) f- D:$(HREGSIZE));
+@if REGISTER_SIZE == "4"
+	D = (D & 0xFFFF0000) | zext(lo);
+@else
+	D = (D & 0xFFFFFFFF00000000) | zext(lo);
+@endif
+}
+
