@@ -54,7 +54,7 @@ analyzer by default. It differs in these ways:
      `e_or2i` or `e_add2i.`), found even when analysis does not reach it
 
   If the startup code loads different values, for example in an image with a bootloader
-  and an application, nothing is assumed and the analysis log lists the values.
+  and an application, nothing is assumed and the application log lists the values.
 - **VLE instructions.** No references are created from `e_lis`, which holds only the
   upper half of an address, or from constants loaded with `e_li`, `se_li`, `se_bgeni`
   and `se_bmaski`. Ghidra's analyzer checks only the classic `lis` and `li`.

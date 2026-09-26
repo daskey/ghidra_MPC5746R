@@ -158,14 +158,18 @@ public class E200AddressAnalyzer extends ConstantPropagationAnalyzer {
 			throws CancelledException {
 		if (assumeSmallDataBases && !smallDataBasesChecked) {
 			smallDataBasesChecked = true;
-			assumeSmallDataBases(program, monitor, log);
+			assumeSmallDataBases(program, monitor);
 		}
 		return super.added(program, set, monitor, log);
 	}
 
 	// ---- Small data area bases ------------------------------------------------------------
 
-	private void assumeSmallDataBases(Program program, TaskMonitor monitor, MessageLog log)
+	/**
+	 * Sets the small data area base registers. The outcome goes to the application log only;
+	 * the analysis message log would show a dialog after every analysis.
+	 */
+	private void assumeSmallDataBases(Program program, TaskMonitor monitor)
 			throws CancelledException {
 		AddressSetView code = executableMemory(program);
 		if (code.isEmpty()) {
@@ -183,11 +187,9 @@ public class E200AddressAnalyzer extends ConstantPropagationAnalyzer {
 				SortedMap<Long, List<Address>> loads = findStartupLoads(program, reg, monitor);
 				if (loads.size() != 1) {
 					if (loads.size() > 1) {
-						String msg = "Not assuming " + reg + ": the startup code loads " +
+						Msg.info(this, "Not assuming " + reg + ": the startup code loads " +
 							"different values " + describe(loads) + "; set its value with " +
-							"Set Register Values";
-						log.appendMsg(getName(), msg);
-						Msg.warn(this, msg);
+							"Set Register Values");
 					}
 					continue;
 				}
@@ -195,10 +197,8 @@ public class E200AddressAnalyzer extends ConstantPropagationAnalyzer {
 				source = "startup code at " + loads.get(value);
 			}
 			setValue(program, reg, code, value);
-			String msg = "Assuming " + reg + " = 0x" + Long.toHexString(value) + " (" + source +
-				") in all executable memory";
-			log.appendMsg(getName(), msg);
-			Msg.info(this, msg);
+			Msg.info(this, "Assuming " + reg + " = 0x" + Long.toHexString(value) + " (" + source +
+				") in all executable memory");
 		}
 	}
 
@@ -233,7 +233,7 @@ public class E200AddressAnalyzer extends ConstantPropagationAnalyzer {
 
 	private Long symbolValue(Program program, String name) {
 		Symbol symbol = SymbolUtilities.getLabelOrFunctionSymbol(program, name,
-			err -> Msg.warn(this, err));
+			err -> Msg.info(this, err));
 		return symbol == null ? null : symbol.getAddress().getOffset();
 	}
 
