@@ -114,11 +114,17 @@ public class E200AddressAnalyzer extends ConstantPropagationAnalyzer {
 	/** Shortest run of erased flash taken as the boundary between two programs. */
 	private static final int MIN_ERASED_RUN = 16;
 
+	/** Samples of a block searched for in the programs to find which one it copies. */
+	private static final int COPY_SAMPLES = 8;
+	private static final int COPY_SAMPLE_SIZE = 32;
+	private static final int COPY_SAMPLE_DISTINCT = 8;
+
 	private boolean assumeSmallDataBases = OPTION_DEFAULT_SDA;
 	private boolean markupDualInstructionOption = OPTION_DEFAULT_MARK_DUAL_INSTRUCTION;
 	private boolean recoverSwitchTables = SWITCH_OPTION_DEFAULT_VALUE;
 
-	private boolean smallDataBasesChecked;
+	/** The executable memory for which the small data area bases were last assumed. */
+	private AddressSetView smallDataBasesCheckedFor;
 
 	public E200AddressAnalyzer() {
 		super(PROCESSOR_NAME);
@@ -164,9 +170,13 @@ public class E200AddressAnalyzer extends ConstantPropagationAnalyzer {
 	@Override
 	public boolean added(Program program, AddressSetView set, TaskMonitor monitor, MessageLog log)
 			throws CancelledException {
-		if (assumeSmallDataBases && !smallDataBasesChecked) {
-			smallDataBasesChecked = true;
-			assumeSmallDataBases(program, monitor);
+		if (assumeSmallDataBases) {
+			// first, and again when memory is added, such as dumps of more of the device
+			AddressSetView code = executableMemory(program);
+			if (!code.equals(smallDataBasesCheckedFor)) {
+				smallDataBasesCheckedFor = code;
+				assumeSmallDataBases(program, code, monitor);
+			}
 		}
 		return super.added(program, set, monitor, log);
 	}
@@ -174,37 +184,45 @@ public class E200AddressAnalyzer extends ConstantPropagationAnalyzer {
 	// ---- Small data area bases ------------------------------------------------------------
 
 	/**
-	 * Sets the small data area base registers. The outcome goes to the application log only;
-	 * the analysis message log would show a dialog after every analysis.
+	 * Sets the small data area base registers in the executable memory where they have no
+	 * values, which the loader, the user or an earlier analysis may have set. The outcome goes
+	 * to the application log only; the analysis message log would show a dialog after every
+	 * analysis.
 	 */
-	private void assumeSmallDataBases(Program program, TaskMonitor monitor)
+	private void assumeSmallDataBases(Program program, AddressSetView code, TaskMonitor monitor)
 			throws CancelledException {
-		AddressSetView code = executableMemory(program);
-		if (code.isEmpty()) {
-			return;
-		}
 		for (String[] base : SMALL_DATA_BASES) {
 			monitor.checkCancelled();
 			Register reg = program.getRegister(base[0]);
-			if (reg == null || hasValues(program, reg, code)) {
-				continue; // set by the loader or the user
+			if (reg == null) {
+				continue;
 			}
+			AddressSet free = new AddressSet(code);
+			AddressRangeIterator it =
+				program.getProgramContext().getRegisterValueAddressRanges(reg);
+			while (it.hasNext()) {
+				free.delete(it.next());
+			}
+			if (free.isEmpty()) {
+				continue;
+			}
+			String where = free.equals(code) ? "all executable memory" : describe(free);
 			Long value = symbolValue(program, base[1]);
 			if (value != null) {
-				setValue(program, reg, code, value);
+				setValue(program, reg, free, value);
 				Msg.info(this, "Assuming " + reg + " = 0x" + Long.toHexString(value) + " (" +
-					base[1] + ") in all executable memory");
+					base[1] + ") in " + where);
 				continue;
 			}
 			SortedMap<Long, List<Address>> loads = findStartupLoads(program, reg, monitor);
 			if (loads.size() == 1) {
 				value = loads.firstKey();
-				setValue(program, reg, code, value);
+				setValue(program, reg, free, value);
 				Msg.info(this, "Assuming " + reg + " = 0x" + Long.toHexString(value) +
-					" (startup code at " + loads.get(value) + ") in all executable memory");
+					" (startup code at " + loads.get(value) + ") in " + where);
 			}
 			else if (loads.size() > 1) {
-				assumePerProgram(program, reg, loads, code, monitor);
+				assumePerProgram(program, reg, loads, code, free, monitor);
 			}
 		}
 	}
@@ -214,11 +232,13 @@ public class E200AddressAnalyzer extends ConstantPropagationAnalyzer {
 	 * image with several separately linked programs such as a boot manager, a bootloader and an
 	 * application. Each value applies to the program whose startup code loads it: the span of
 	 * the code that the startup code reaches, extended to the erased flash that separates it
-	 * from the next program. Code between programs without erased flash gets no value.
+	 * from the next program. Code between programs without erased flash gets no value. A block
+	 * with code of no program, such as code copied to RAM, gets the values of the program whose
+	 * code it copies.
 	 */
 	private void assumePerProgram(Program program, Register reg,
-			SortedMap<Long, List<Address>> loads, AddressSetView code, TaskMonitor monitor)
-			throws CancelledException {
+			SortedMap<Long, List<Address>> loads, AddressSetView code, AddressSetView free,
+			TaskMonitor monitor) throws CancelledException {
 		Set<Address> sites = new HashSet<>();
 		loads.values().forEach(sites::addAll);
 
@@ -244,8 +264,24 @@ public class E200AddressAnalyzer extends ConstantPropagationAnalyzer {
 		}
 
 		Map<Long, AddressSet> regions = partition(program, own, monitor);
+
+		// blocks with code of no program, such as code copied to RAM: the values of the
+		// program whose code they copy
+		AddressSet covered = new AddressSet();
+		regions.values().forEach(covered::add);
+		for (MemoryBlock block : program.getMemory().getBlocks()) {
+			if (code.contains(block.getStart(), block.getEnd()) &&
+				free.intersects(block.getStart(), block.getEnd()) &&
+				!covered.intersects(block.getStart(), block.getEnd())) {
+				Long owner = copiedFrom(program.getMemory(), block, regions, monitor);
+				if (owner != null) {
+					regions.get(owner).add(block.getStart(), block.getEnd());
+				}
+			}
+		}
+
 		for (Map.Entry<Long, AddressSet> entry : regions.entrySet()) {
-			AddressSet region = entry.getValue().intersect(code);
+			AddressSet region = entry.getValue().intersect(free);
 			if (region.isEmpty()) {
 				continue;
 			}
@@ -317,6 +353,49 @@ public class E200AddressAnalyzer extends ConstantPropagationAnalyzer {
 			}
 		}
 		return regions;
+	}
+
+	/**
+	 * The value of the program whose code a block copies: samples of the block's bytes are
+	 * searched for in the regions of each value. Null if no sample is found, or samples are
+	 * found in the regions of different values.
+	 */
+	private static Long copiedFrom(Memory memory, MemoryBlock block,
+			Map<Long, AddressSet> regions, TaskMonitor monitor) throws CancelledException {
+		Set<Long> owners = new HashSet<>();
+		byte[] sample = new byte[COPY_SAMPLE_SIZE];
+		for (int i = 0; i < COPY_SAMPLES; i++) {
+			monitor.checkCancelled();
+			long offset = (block.getSize() * i / COPY_SAMPLES) & ~1L;
+			if (offset + sample.length > block.getSize()) {
+				break;
+			}
+			try {
+				if (memory.getBytes(block.getStart().add(offset), sample) != sample.length) {
+					continue;
+				}
+			}
+			catch (MemoryAccessException e) {
+				continue;
+			}
+			Set<Byte> distinct = new HashSet<>();
+			for (byte b : sample) {
+				distinct.add(b);
+			}
+			if (distinct.size() < COPY_SAMPLE_DISTINCT) {
+				continue; // erased, zeroed or repetitive bytes are found anywhere
+			}
+			for (Map.Entry<Long, AddressSet> entry : regions.entrySet()) {
+				for (AddressRange range : entry.getValue()) {
+					if (memory.findBytes(range.getMinAddress(), range.getMaxAddress(), sample,
+						null, true, monitor) != null) {
+						owners.add(entry.getKey());
+						break;
+					}
+				}
+			}
+		}
+		return owners.size() == 1 ? owners.iterator().next() : null;
 	}
 
 	/**
@@ -425,17 +504,6 @@ public class E200AddressAnalyzer extends ConstantPropagationAnalyzer {
 			set.add(memory.getLoadedAndInitializedAddressSet());
 		}
 		return set;
-	}
-
-	private static boolean hasValues(Program program, Register reg, AddressSetView set) {
-		AddressRangeIterator it = program.getProgramContext().getRegisterValueAddressRanges(reg);
-		while (it.hasNext()) {
-			AddressRange range = it.next();
-			if (set.intersects(range.getMinAddress(), range.getMaxAddress())) {
-				return true;
-			}
-		}
-		return false;
 	}
 
 	private Long symbolValue(Program program, String name) {

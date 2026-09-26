@@ -63,8 +63,14 @@ analyzer by default. It differs in these ways:
   value then applies to its own program: the span of the code that its startup code
   reaches through branches and direct calls, extended to the erased flash (0xFF) that
   separates it from the next program. Addresses between the code of two programs with no
-  erased flash between them get no value. The application log lists the range of each
+  erased flash between them get no value. Code that no startup code reaches, such as a
+  dump of local instruction memory holding code the startup code copied there, gets the
+  values of the program whose code it copies. The application log lists the range of each
   value.
+
+  Registers that already have values keep them. When memory is added, for example dumps
+  of a bootloader or of RAM after the first analysis, the next analysis assumes values in
+  the new memory.
 - **VLE instructions.** No references are created from `e_lis`, which holds only the
   upper half of an address, or from constants loaded with `e_li`, `se_li`, `se_bgeni`
   and `se_bmaski`. Ghidra's analyzer checks only the classic `lis` and `li`.
@@ -79,10 +85,9 @@ results:
 - about 4,400 small data accesses become references
 - analysis finds 1,036 more instructions and 22 more functions
 
-The test bootloader image (64 KB) holds two programs, each with its own startup code:
-r13 = 0x40012000 and r2 = 0x08FA6254 in the first, r13 = 0x40011200 and r2 = 0x08FA9300 in
-the second. Earlier releases assumed neither register there. A combined bootloader and
-application image gets three ranges, split at the erased flash between the programs.
+In a test image with a bootloader of two programs and an application, each of the three
+programs gets its own r13 and r2, split at the erased flash between them; earlier releases
+assumed neither register there.
 
 ### PowerPC e200 Entry Points
 
@@ -149,7 +154,8 @@ A flash image has no RAM, so RAM variables have no data. The decompiler then sho
 `_DAT_40001234` and warns "Globals starting with '_' overlap smaller symbols at the same
 address". The analyzer therefore first adds uninitialized blocks for the MPC5746R RAM,
 where nothing is mapped yet, and creates data of the accessed size where code references
-it:
+it. Around a dump of part of a RAM, the rest gets blocks named after the RAM and their
+start address, such as `SRAM_40000000`.
 
 | Block | Addresses | |
 |---|---|---|
@@ -173,7 +179,66 @@ after), and:
 - decompiled code has 70% fewer local variables of undefined type (3,349 to 1,017), 47%
   fewer undefined parameters (1,131 to 596) and 55% fewer `(float)` casts (2,631 to 1,189)
 
-To apply both analyzers to an existing program, run them with **Analysis > One Shot**.
+### PowerPC e200 Peripherals
+
+`src/main/java/.../E200PeripheralAnalyzer.java` adds the MPC5746R peripherals from NXP's
+CMSIS-SVD description, which the extension bundles (`data/svd/MPC5746R.svd.gz`, under the
+license in the file). For each of the 101 peripherals it adds a volatile, uninitialized
+memory block where nothing is mapped, and a structure of its registers at its base address,
+labeled with its name. Peripheral code then decompiles as
+
+```c
+INTC.PSR[0x1b] = 0;
+FCCU.CTRLK = 0x913756af;
+FCCU.CTRL = 1;
+MEMU.SYS_RAM_CERR[i].STS = 0xff;
+DMAMUX_0.CHCFG[ch] = 0;
+```
+
+instead of `_DAT_fc040076 = 0` and so on.
+- Arrays of registers become arrays (`SIUL2_SVD_GEN.MSCR[12]`), and registers repeated for
+  each channel arrays of structures (`DMA_0.TCD[ch].SADDR`). Registers whose names cannot
+  be grouped that way are separate (`eMIOS_0.A8`).
+- Peripherals with the same registers share a type named after their group (`DSPI_Type`
+  for `DSPI_0` to `DSPI_4`), which can be applied to a driver's base pointer by hand.
+- The comment of each register gives its description and the masks of its fields
+  (`Fields: MDIS=0x2 FRZ=0x1`). An alternate view of a register, such as DSPI's
+  `PUSHR_SLAVE`, is named in the comment of the register it shares the address with.
+- Space the SVD does not describe is typed as 4-byte words named by their offset from the
+  base (`SIUL2_SVD_GEN.field_0xc90`), to look up in the reference manual.
+- Tables of two or more peripheral base addresses in initialized memory, such as the base
+  address tables of drivers that serve several instances of a peripheral, become pointers
+  to the peripherals' structures, so that the drivers' register accesses are named too
+  (`base->UARTSR = 0x3d04`). A single base address is left alone: in the test firmware
+  those were masks and the bounds of memory regions. When memory is added later, such as
+  a dump, the next analysis types the tables in it too.
+- Registers are plain integers. The option **Register bit fields** types them as bit field
+  structures instead: the decompiler then names the field a test extracts
+  (`FCCU.CTRL.OPS != 3`), but casts every write of a whole register
+  (`INTC.PSR[0] = (INTC_PSR_Type)0x0`). In 16 peripheral functions of the test firmware
+  that was 462 casts for 3 field names.
+
+The peripherals are added at the end of analysis, like the RAM blocks and for the same
+reason: flash values would otherwise become pointers into peripheral space. On the test
+firmware the analyzer takes half a second; the warning about globals overlapping smaller
+symbols drops from 90 functions to 9, and all decompiler warnings from 150 to 63.
+
+To apply the analyzers to an existing program, run them with **Analysis > One Shot**.
+
+### Memory dumps
+
+`ghidra_scripts/AddMemoryDumps.java` (category **PowerPC e200** in the Script Manager) adds
+the memory dumps in a folder to the current program, each at the address range its file
+name ends with, as in `sram_40000000-4003FFFF.bin`.
+- RAM dumps become read/write blocks, local instruction memory also executable, and the
+  data flash at 0x00800000 a read/write block. Other dumps, such as code flash, become
+  read/write/execute blocks as the Raw Binary loader creates them.
+- A dump over the empty RAM blocks that analysis added fills them and keeps their data. A
+  dump over initialized memory is skipped.
+
+Run analysis after adding the dumps, or again if the program was analyzed before: it finds
+the code in local instruction memory and in added flash, assumes r13 and r2 there, and adds
+empty blocks only for the RAM the dumps do not cover.
 
 ## Installation
 
@@ -197,12 +262,14 @@ Ghidra warns when you install the extension into a different release.
   and set the base address where the image sits in the device's memory map. Analysis
   starts from the boot header, the interrupt vectors and the function prologues it finds;
   an image with a bootloader and an application can be imported as one file.
-- RAM: the Global Data Types analyzer adds the MPC5746R RAM blocks at the end of the first
-  analysis (see above). If you map memory yourself, do it after the first analysis for the
-  same reason. A later full re-analysis with RAM mapped adds about 1,300 flash-to-RAM
-  pointers on the test firmware, but keeps the code.
-- Peripherals: avoid a block that reaches 0xFFFFFFFF. Erased flash reads 0xFFFFFFFF, and
-  the Create Address Tables analyzer turned 579,000 erased words into pointers.
+- RAM and peripherals: the analyzers add the MPC5746R RAM and peripheral blocks at the end
+  of the first analysis (see above). If you map memory yourself, do it after the first
+  analysis for the same reason; `AddMemoryDumps.java` adds dumps of RAM and flash (see
+  above). A later full re-analysis with RAM mapped adds about 1,300 flash-to-RAM pointers
+  on the test firmware, but keeps the code.
+- Peripherals mapped by hand: avoid a block that reaches 0xFFFFFFFF. Erased flash reads
+  0xFFFFFFFF, and the Create Address Tables analyzer turned 579,000 erased words into
+  pointers.
 - ELF files: the importer lists the language for 32-bit big-endian PowerPC ELF files.
 
 ## Verification
@@ -270,6 +337,7 @@ When syncing, check that file for changes worth carrying over.
 - NXP, *Lightweight Signal Processing APU Reference Manual*, Rev. 3
 - NXP AN12177, *e200z4 and e200z7 Core Memory Protection Unit*
 - NXP AN4802, *MPC57xx e200zx Core Differences*
+- NXP, CMSIS-SVD description of the MPC5746R, version 1.6
 - NXP, *EREF 2.0: A Programmer's Reference Manual for Freescale Power Architecture Processors*
 - GNU binutils 2.42 and NXP's binutils 2.28 for e200 (opcode tables)
 - Ghidra pull requests [#8828](https://github.com/NationalSecurityAgency/ghidra/pull/8828)

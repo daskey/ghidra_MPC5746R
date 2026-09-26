@@ -53,7 +53,8 @@ import ghidra.util.task.TaskMonitor;
  * Flash images have no RAM, so RAM variables have no data: the decompiler sees one-byte
  * labels, shows the variables as {@code _DAT_...} and warns that globals overlap smaller
  * symbols. The analyzer therefore first adds uninitialized blocks for the MPC5746R RAM
- * that is not mapped and creates data of the accessed size where code references it. It
+ * that is not mapped, also around dumps of part of the RAM, and creates data of the
+ * accessed size where code references it. It
  * does this at the end of analysis: with RAM mapped, Ghidra's address table analysis takes
  * flash values such as the float 2.0 (0x40000000) or pairs of VLE instructions for
  * pointers into RAM.
@@ -68,11 +69,11 @@ public class E200DataTypeAnalyzer extends AbstractAnalyzer {
 
 	private static final String OPTION_NAME_RAM_BLOCKS = "Add MPC5746R RAM blocks";
 	private static final String OPTION_DESCRIPTION_RAM_BLOCKS =
-		"Add uninitialized blocks for the MPC5746R RAM that is not mapped, as in flash images:\n" +
-			"SRAM (0x40000000), IMEM_0 (0x50000000), DMEM_0 (0x50800000), IMEM_1 (0x51000000)\n" +
-			"and DMEM_1 (0x51800000), and create data of the accessed size where code\n" +
-			"references them. The decompiler then shows RAM variables with their size instead\n" +
-			"of _DAT_... names, and this analyzer can type them.";
+		"Add uninitialized blocks for the MPC5746R RAM that is not mapped, as in flash images\n" +
+			"or around a dump of part of the RAM: SRAM (0x40000000), IMEM_0 (0x50000000),\n" +
+			"DMEM_0 (0x50800000), IMEM_1 (0x51000000) and DMEM_1 (0x51800000), and create data\n" +
+			"of the accessed size where code references them. The decompiler then shows RAM\n" +
+			"variables with their size instead of _DAT_... names, and this analyzer can type them.";
 	private static final boolean OPTION_DEFAULT_RAM_BLOCKS = true;
 
 	/** A RAM region of the MPC5746R. */
@@ -191,7 +192,9 @@ public class E200DataTypeAnalyzer extends AbstractAnalyzer {
 	}
 
 	/**
-	 * Adds the MPC5746R RAM blocks whose address range has nothing mapped.
+	 * Adds blocks for the parts of the MPC5746R RAM that have nothing mapped, such as the
+	 * space around a dump of part of the RAM. A part is named after its RAM with its start
+	 * address ({@code SRAM_40000000}) unless it is the whole RAM.
 	 *
 	 * @return the address ranges of the added blocks
 	 */
@@ -203,20 +206,21 @@ public class E200DataTypeAnalyzer extends AbstractAnalyzer {
 		for (RamBlock ram : RAM_BLOCKS) {
 			Address start = space.getAddress(ram.start());
 			Address end = space.getAddress(ram.start() + ram.length() - 1);
-			if (memory.intersects(start, end)) {
-				continue;
-			}
-			try {
-				MemoryBlock block =
-					memory.createUninitializedBlock(ram.name(), start, ram.length(), false);
-				block.setPermissions(true, true, ram.execute());
-				block.setComment(ram.description() + ", added by " + NAME);
-				added.add(start, end);
-				names.add(ram.name());
-			}
-			catch (LockException | MemoryConflictException | AddressOverflowException e) {
-				Msg.info(E200DataTypeAnalyzer.class,
-					"Could not add " + ram.name() + ": " + e.getMessage());
+			for (AddressRange range : new AddressSet(start, end).subtract(memory)) {
+				String name = range.getLength() == ram.length() ? ram.name()
+						: ram.name() + "_" + range.getMinAddress();
+				try {
+					MemoryBlock block = memory.createUninitializedBlock(name,
+						range.getMinAddress(), range.getLength(), false);
+					block.setPermissions(true, true, ram.execute());
+					block.setComment(ram.description() + ", added by " + NAME);
+					added.add(range);
+					names.add(name);
+				}
+				catch (LockException | MemoryConflictException | AddressOverflowException e) {
+					Msg.info(E200DataTypeAnalyzer.class,
+						"Could not add " + name + ": " + e.getMessage());
+				}
 			}
 		}
 		if (!names.isEmpty()) {
