@@ -5,6 +5,9 @@
   The e200z4 has no FPRs: EFPU2 keeps single-precision values in GPRs, so floating-point
   arguments and results use the same registers as integers.
   r2 and r13 hold the small data area bases (_SDA2_BASE_, _SDA_BASE_).
+  LR holds the return address. There is no call fixup: Ghidra's PowerPC specs fix up calls
+  to __get_pc_thunk_lr, the 32-bit blrl word (LR = target + 4) that classic PIC code calls
+  to read its address. VLE code cannot execute that word.
 -->
 <compiler_spec>
   <data_organization>
@@ -24,6 +27,9 @@
     <range space="ram"/>
   </global>
   <stackpointer register="r1" space="ram"/>
+  <returnaddress>
+    <register name="LR"/>
+  </returnaddress>
   <default_proto>
     <prototype name="__stdcall" extrapop="0" stackshift="0">
       <input pointermax="8">
@@ -134,14 +140,4 @@
       </killedbycall>
     </prototype>
   </default_proto>
-
-  <callfixup name="get_pc_thunk_lr">
-    <target name="__get_pc_thunk_lr"/>
-    <pcode>
-      <body><![CDATA[
-      LR = inst_dest + 4;
-      ]]></body>
-    </pcode>
-  </callfixup>
-
 </compiler_spec>

@@ -8,6 +8,9 @@
     <property key="useropLibs" value="ppc"/>
     <!-- Replaced by the PowerPC e200 Constant Reference Analyzer of this extension -->
     <property key="Analyzers.PowerPC Constant Reference Analyzer" value="false"/>
+    <!-- Function prototypes from the decompiler (Ghidra enables it only for Windows programs):
+         parameter and return types, fewer undefined variables and casts -->
+    <property key="Analyzers.Decompiler Parameter ID" value="true"/>
   </properties>
 
   <programcounter register="pc"/>
