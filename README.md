@@ -91,13 +91,33 @@ It runs after Ghidra's Decompiler Parameter ID analyzer, which commits the decom
 function prototypes. Ghidra enables that analyzer by default only for Windows programs;
 the processor spec enables it for this language.
 
-On the test firmware the two analyzers add 15 seconds to the analysis (34 s before, 49 s
+A flash image has no RAM, so RAM variables have no data. The decompiler then shows them as
+`_DAT_40001234` and warns "Globals starting with '_' overlap smaller symbols at the same
+address". The analyzer therefore first adds uninitialized blocks for the MPC5746R RAM,
+where nothing is mapped yet, and creates data of the accessed size where code references
+it:
+
+| Block | Addresses | |
+|---|---|---|
+| `SRAM` | 0x40000000-0x4003FFFF | system RAM |
+| `IMEM_0`, `IMEM_1` | 0x50000000-0x50003FFF, 0x51000000-0x51003FFF | local instruction memory (rwx) |
+| `DMEM_0`, `DMEM_1` | 0x50800000-0x50807FFF, 0x51800000-0x51807FFF | local data memory |
+
+It adds them at the end of analysis. With RAM mapped from the start, Ghidra's Create
+Address Tables analyzer takes flash values for pointers into RAM, such as the float 2.0
+(0x40000000) or pairs of VLE instructions; on the test firmware that cost 11 functions. The
+option **Add MPC5746R RAM blocks** turns this off.
+
+On the test firmware the two analyzers add 13 seconds to the analysis (34 s before, 47 s
 after), and:
-- undefined data in the listing drops from 5,579 to 696 items. Of those typed, 3,236 are now
+- undefined data in flash drops from 5,579 to 696 items. Of those typed, 3,236 are now
   `float` (calibration constants such as 14.7, -40.0 or 3500.0), 868 `ushort` or `short`,
-  715 `byte` or `sbyte` and 64 `int`, `uint` or pointer.
-- decompiled code has 42% fewer local variables of undefined type (3,349 to 1,925), 45%
-  fewer undefined parameters (1,131 to 626) and 57% fewer `(float)` casts (2,631 to 1,139)
+  715 `byte` or `sbyte` and 64 `int`, `uint` or pointer. With RAM, 13,309 variables are
+  typed.
+- the warning about globals overlapping smaller symbols is left in 38 of 6,381 functions
+  instead of 2,422 (the rest access peripherals)
+- decompiled code has 70% fewer local variables of undefined type (3,349 to 1,017), 47%
+  fewer undefined parameters (1,131 to 596) and 55% fewer `(float)` casts (2,631 to 1,189)
 
 To apply both analyzers to an existing program, run them with **Analysis > One Shot**.
 
@@ -121,21 +141,12 @@ Ghidra warns when you install the extension into a different release.
 
 - Raw flash images: import with the **Raw Binary** loader, choose `PowerPC:BE:32:VLE-e200`
   and set the base address where the image sits in the device's memory map.
-- RAM: a flash image has no RAM, so the decompiler shows RAM variables as `_DAT_40001234`
-  and warns "Globals starting with '_' overlap smaller symbols at the same address" (in
-  2,422 of the test firmware's 6,381 functions). After the first analysis, add
-  uninitialized blocks for system RAM (0x40000000) and the cores' local data memory
-  (0x50800000, 0x51800000). Then run **Analysis > One Shot** with the PowerPC e200 Constant
-  Reference Analyzer, and after it the PowerPC e200 Global Data Types analyzer. On the test
-  firmware this leaves the warning in 41 functions (peripheral accesses), and local
-  variables of undefined type drop from 1,925 to 1,030.
-  - Do not add the blocks before the first analysis. Ghidra's Create Address Tables
-    analyzer then takes flash values for RAM pointers, such as the float 2.0 (0x40000000)
-    or VLE instruction pairs, and on the test firmware 11 functions were lost to such
-    tables. A later full re-analysis still adds about 1,300 flash-to-RAM pointers, but
-    keeps the code.
-  - Avoid a peripheral block that reaches 0xFFFFFFFF: erased flash reads 0xFFFFFFFF, and
-    the same analyzer turned 579,000 erased words into pointers.
+- RAM: the Global Data Types analyzer adds the MPC5746R RAM blocks at the end of the first
+  analysis (see above). If you map memory yourself, do it after the first analysis for the
+  same reason. A later full re-analysis with RAM mapped adds about 1,300 flash-to-RAM
+  pointers on the test firmware, but keeps the code.
+- Peripherals: avoid a block that reaches 0xFFFFFFFF. Erased flash reads 0xFFFFFFFF, and
+  the Create Address Tables analyzer turned 579,000 erased words into pointers.
 - ELF files: the importer lists the language for 32-bit big-endian PowerPC ELF files.
 
 ## Verification
