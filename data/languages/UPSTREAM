@@ -1,0 +1,4 @@
+Unmodified copies of Ghidra PowerPC processor files, synced with
+tools/sync_upstream.py.
+Source revision: 2539d08de08abedef24897c8a12c94763a32d5bb 2026-06-30
+Files: languages/ppc_common.sinc, languages/ppc_instructions.sinc, languages/ppc_embedded.sinc, languages/ppc_vle.sinc, languages/quicciii.sinc, languages/lmwInstructions.sinc, languages/lswInstructions.sinc, languages/stmwInstructions.sinc, languages/stswiInstructions.sinc, languages/mulhwInstructions.sinc, languages/SPEF_SCR.sinc, languages/ppc.dwarf, manuals/PowerISA.idx

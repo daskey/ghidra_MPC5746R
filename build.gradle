@@ -1,0 +1,29 @@
+// Builds the extension zip for File > Install Extensions in Ghidra:
+//
+//     gradle -PGHIDRA_INSTALL_DIR=<absolute path to Ghidra>
+//
+// or set the GHIDRA_INSTALL_DIR environment variable instead. The zip is written to dist/.
+// Use a Gradle version supported by that Ghidra (application.gradle.min in
+// <GHIDRA_INSTALL_DIR>/Ghidra/application.properties).
+
+def ghidraInstallDir
+
+if (System.env.GHIDRA_INSTALL_DIR) {
+	ghidraInstallDir = System.env.GHIDRA_INSTALL_DIR
+}
+else if (project.hasProperty("GHIDRA_INSTALL_DIR")) {
+	ghidraInstallDir = project.getProperty("GHIDRA_INSTALL_DIR")
+}
+else {
+	throw new GradleException("GHIDRA_INSTALL_DIR is not set")
+}
+
+task distributeExtension {
+	group = "Ghidra"
+
+	apply from: new File(ghidraInstallDir).getCanonicalPath() + "/support/buildExtension.gradle"
+	dependsOn ':buildExtension'
+}
+
+// Keep local test output out of the zip
+buildExtension.exclude 'lsp_tests.*', 'lsp_results.tsv', '**/__pycache__/**'

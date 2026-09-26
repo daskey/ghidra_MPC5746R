@@ -1,0 +1,125 @@
+# e200z4 Embedded Floating-Point APU version 2 (EFPU2): scalar single precision.
+#
+# The e200z4 cores in MPC57xx devices have 32-bit GPRs and no SPE, so every
+# single-precision value occupies a whole GPR. This replaces Ghidra's
+# Scalar_SPFP.sinc (written for 64-bit e500 GPRs) and SPE_FloatMulAdd.sinc.
+# The vector (evfs*) and double-precision (efd*) forms need 64-bit GPRs and do
+# not exist on this core.
+#
+# Encodings: NXP GNU binutils 2.28 for e200 (bin.2-28-efs2) and EREF 2.0.
+#
+# Modelling notes:
+# - Conversions to integer are C-style truncations, as elsewhere in Ghidra.
+#   Hardware saturation of out-of-range values and NaN inputs is not modelled.
+# - SPEFSCR status and sticky bits are not updated.
+# - Compares write the GT bit of the CR field; the other three bits are
+#   undefined by the architecture and are left unchanged.
+# - The fused multiply-add instructions round once in hardware; the p-code
+#   rounds after the multiply as well.
+
+define pcodeop convertFloatToHalf;
+define pcodeop convertHalfToFloat;
+
+# efsadd rD,rA,rB
+:efsadd D,A,B		is OP=4 & D & A & B & XOP_0_10=0x2C0 { D = A f+ B; }
+# efssub rD,rA,rB
+:efssub D,A,B		is OP=4 & D & A & B & XOP_0_10=0x2C1 { D = A f- B; }
+# efsmul rD,rA,rB
+:efsmul D,A,B		is OP=4 & D & A & B & XOP_0_10=0x2C8 { D = A f* B; }
+# efsdiv rD,rA,rB
+:efsdiv D,A,B		is OP=4 & D & A & B & XOP_0_10=0x2C9 { D = A f/ B; }
+
+# efsabs rD,rA
+:efsabs D,A			is OP=4 & D & A & BITS_11_15=0 & XOP_0_10=0x2C4 { D = abs(A); }
+# efsnabs rD,rA
+:efsnabs D,A		is OP=4 & D & A & BITS_11_15=0 & XOP_0_10=0x2C5 { D = f- abs(A); }
+# efsneg rD,rA
+:efsneg D,A			is OP=4 & D & A & BITS_11_15=0 & XOP_0_10=0x2C6 { D = f- A; }
+
+# efscmpgt/efststgt crfD,rA,rB: result in the GT bit of crfD
+:efscmpgt CRFD,A,B	is OP=4 & CRFD & BITS_21_22=0 & A & B & XOP_0_10=0x2CC { CRFD[2,1] = A f> B; }
+:efscmplt CRFD,A,B	is OP=4 & CRFD & BITS_21_22=0 & A & B & XOP_0_10=0x2CD { CRFD[2,1] = A f< B; }
+:efscmpeq CRFD,A,B	is OP=4 & CRFD & BITS_21_22=0 & A & B & XOP_0_10=0x2CE { CRFD[2,1] = A f== B; }
+:efststgt CRFD,A,B	is OP=4 & CRFD & BITS_21_22=0 & A & B & XOP_0_10=0x2DC { CRFD[2,1] = A f> B; }
+:efststlt CRFD,A,B	is OP=4 & CRFD & BITS_21_22=0 & A & B & XOP_0_10=0x2DD { CRFD[2,1] = A f< B; }
+:efststeq CRFD,A,B	is OP=4 & CRFD & BITS_21_22=0 & A & B & XOP_0_10=0x2DE { CRFD[2,1] = A f== B; }
+
+# Integer and fraction to float
+:efscfui D,B		is OP=4 & D & BITS_16_20=0 & B & XOP_0_10=0x2D0 {
+	tmp:8 = zext(B);
+	D = int2float(tmp);
+}
+:efscfsi D,B		is OP=4 & D & BITS_16_20=0 & B & XOP_0_10=0x2D1 { D = int2float(B); }
+:efscfuf D,B		is OP=4 & D & BITS_16_20=0 & B & XOP_0_10=0x2D2 {
+	tmp:8 = zext(B);
+	scale:8 = 0x100000000;
+	D = int2float(tmp) f/ int2float(scale);
+}
+:efscfsf D,B		is OP=4 & D & BITS_16_20=0 & B & XOP_0_10=0x2D3 {
+	scale:8 = 0x80000000;
+	D = int2float(B) f/ int2float(scale);
+}
+
+# Float to integer and fraction. The non-z forms use the current rounding mode,
+# modelled as round to nearest.
+:efsctui D,B		is OP=4 & D & BITS_16_20=0 & B & XOP_0_10=0x2D4 {
+	tmp:8 = trunc(round(B));
+	D = tmp:4;
+}
+:efsctsi D,B		is OP=4 & D & BITS_16_20=0 & B & XOP_0_10=0x2D5 { D = trunc(round(B)); }
+:efsctuf D,B		is OP=4 & D & BITS_16_20=0 & B & XOP_0_10=0x2D6 {
+	scale:8 = 0x100000000;
+	tmp:8 = trunc(round(B f* int2float(scale)));
+	D = tmp:4;
+}
+:efsctsf D,B		is OP=4 & D & BITS_16_20=0 & B & XOP_0_10=0x2D7 {
+	scale:8 = 0x80000000;
+	D = trunc(round(B f* int2float(scale)));
+}
+:efsctuiz D,B		is OP=4 & D & BITS_16_20=0 & B & XOP_0_10=0x2D8 {
+	tmp:8 = trunc(B);
+	D = tmp:4;
+}
+:efsctsiz D,B		is OP=4 & D & BITS_16_20=0 & B & XOP_0_10=0x2DA { D = trunc(B); }
+
+# ---- EFPU2 additions ----------------------------------------------------------
+
+# efsmax rD,rA,rB (NaN operands are not modelled)
+:efsmax D,A,B		is OP=4 & D & A & B & XOP_0_10=0x2B0 {
+	local result:4 = A;
+	if (A f>= B) goto <done>;
+	result = B;
+<done>
+	D = result;
+}
+
+# efsmin rD,rA,rB (NaN operands are not modelled)
+:efsmin D,A,B		is OP=4 & D & A & B & XOP_0_10=0x2B1 {
+	local result:4 = A;
+	if (A f<= B) goto <done>;
+	result = B;
+<done>
+	D = result;
+}
+
+# efsmadd rD,rA,rB: rD = rA * rB + rD
+:efsmadd D,A,B		is OP=4 & D & A & B & XOP_0_10=0x2C2 { D = (A f* B) f+ D; }
+# efsmsub rD,rA,rB: rD = rA * rB - rD
+:efsmsub D,A,B		is OP=4 & D & A & B & XOP_0_10=0x2C3 { D = (A f* B) f- D; }
+# efsnmadd rD,rA,rB: rD = -(rA * rB + rD)
+:efsnmadd D,A,B		is OP=4 & D & A & B & XOP_0_10=0x2CA { D = f- ((A f* B) f+ D); }
+# efsnmsub rD,rA,rB: rD = -(rA * rB - rD)
+:efsnmsub D,A,B		is OP=4 & D & A & B & XOP_0_10=0x2CB { D = f- ((A f* B) f- D); }
+
+# efssqrt rD,rA
+:efssqrt D,A		is OP=4 & D & A & BITS_11_15=0 & XOP_0_10=0x2C7 { D = sqrt(A); }
+
+# efscfh rD,rB: half-precision value in the low halfword of rB to single
+:efscfh D,B			is OP=4 & D & BITS_16_20=4 & B & XOP_0_10=0x2D1 {
+	D = convertHalfToFloat(B:2);
+}
+# efscth rD,rB: single to half precision in the low halfword of rD
+:efscth D,B			is OP=4 & D & BITS_16_20=4 & B & XOP_0_10=0x2D5 {
+	local half:2 = convertFloatToHalf(B);
+	D = zext(half);
+}

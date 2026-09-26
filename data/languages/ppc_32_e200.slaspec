@@ -1,13 +1,12 @@
-# SLA specification file for IBM PowerPC e200 series core
-
-@define E200 "1"
+# SLEIGH specification for the NXP e200z4 core (VLE only, 32-bit GPRs) as used in
+# MPC57xx devices such as the MPC5746R.
+#
+# Ghidra's PowerPC sources are included unmodified (see UPSTREAM); everything
+# e200z4-specific lives in the e200_*.sinc files included last.
 
 @define ENDIAN "big"
 
 @define REGISTER_SIZE "4"
-
-@define HREGSIZE "2"
-@define HREGBITS "16"
 
 @define EATRUNC "ea"
 
@@ -18,7 +17,10 @@
 @include "ppc_common.sinc"
 @include "ppc_vle.sinc"
 @include "quicciii.sinc"
-@include "evx.sinc"
+# SPEFSCR flag registers; not used by the semantics, kept so the register set
+# stays compatible with programs created by version 1.7 of this language.
 @include "SPEF_SCR.sinc"
-@include "SPE_FloatMulAdd.sinc"
-@include "ppc_e200_ds.sinc"
+
+@include "e200_efpu2.sinc"
+@include "e200_isa.sinc"
+@include "e200_lsp.sinc"

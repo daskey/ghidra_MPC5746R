@@ -1,1 +1,15 @@
-data/languages/ppc_32_e200.sla
+# Compiled by Ghidra from the SLEIGH sources on first use
+data/languages/*.sla
+data/languages/*.sla.lock
+
+# Gradle
+.gradle/
+build/
+dist/
+
+# tools/lsp_test output
+lsp_tests.bin
+lsp_tests.tsv
+lsp_tests.meta
+lsp_results.tsv
+__pycache__/

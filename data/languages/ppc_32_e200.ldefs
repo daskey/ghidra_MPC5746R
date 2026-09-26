@@ -1,18 +1,19 @@
 <?xml version="1.0" encoding="UTF-8"?>
 
 <language_definitions>
+  <!-- The id is kept from earlier releases so existing projects keep opening. -->
   <language processor="PowerPC"
             endian="big"
             size="32"
             variant="e200"
-            version="1.7"
+            version="1.8"
             slafile="ppc_32_e200.sla"
-            processorspec="ppc_32.pspec"
-            manualindexfile="../manuals/PowerPC.idx"
+            processorspec="ppc_32_e200.pspec"
+            manualindexfile="../manuals/PowerISA.idx"
             id="PowerPC:BE:32:VLE-e200">
-    <description>Power ISA Embedded e200 32-bit big endian w/VLE</description>
-    <compiler name="default" spec="ppc_32.cspec" id="default"/>
-    <external_name tool="gnu" name="powerpc:e200"/>
+    <description>NXP e200z4 (MPC57xx, e.g. MPC5746R) 32-bit big endian, VLE only, EFPU2, LSP</description>
+    <compiler name="default" spec="ppc_32_e200.cspec" id="default"/>
+    <external_name tool="gnu" name="powerpc:vle"/>
     <external_name tool="IDA-PRO" name="ppc"/>
     <external_name tool="DWARF.register.mapping.file" name="ppc.dwarf"/>
   </language>

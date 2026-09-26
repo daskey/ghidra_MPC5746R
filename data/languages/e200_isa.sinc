@@ -1,0 +1,226 @@
+# e200z4 (MPC57xx, e200z4xx n3) instructions missing from Ghidra's PowerPC files.
+#
+# Sources:
+#   NXP GNU binutils 2.28 for e200: MPU and decorated storage opcodes (E200Z4).
+#   GNU binutils 2.42: e_lmvmcsrrw / e_stmvmcsrrw, cache bypass decorated storage.
+#   AN12177 "e200z4 and e200z7 Core Memory Protection Unit": MAS0-3 are SPRs 624-627.
+#   AN4802 "MPC57xx e200zx Core Differences": saturated math on e200z425 rev 2.
+
+# ---- Core memory protection unit ------------------------------------------------
+# e200z4 cores in MPC57xx devices have an MPU instead of an MMU. The MPU instructions
+# reuse the TLB opcodes with bit 25 set; binutils ignores the remaining fields.
+
+define pcodeop mpuReadEntry;
+define pcodeop mpuWriteEntry;
+define pcodeop mpuSynchronize;
+
+# mpure: read the entry selected by MAS0 into MAS0-MAS3
+:mpure		is $(ISVLE) & OP=31 & BIT_25=1 & XOP_1_10=946 {
+	mpuReadEntry(spr270);
+}
+# mpuwe: write MAS0-MAS3 to the entry selected by MAS0
+:mpuwe		is $(ISVLE) & OP=31 & BIT_25=1 & XOP_1_10=978 {
+	mpuWriteEntry(spr270, spr271, spr272, spr273);
+}
+# mpusync: MPU synchronize
+:mpusync	is $(ISVLE) & OP=31 & BIT_25=1 & XOP_1_10=566 {
+	mpuSynchronize();
+}
+
+# ---- Decorated storage -------------------------------------------------------------
+# The decoration in rA is passed to the target with the access to rB, for example the
+# MPC57xx Decorated Storage Memory Controller. The effect depends on the target, so the
+# accesses are opaque operations.
+
+define pcodeop decoratedLoad;
+define pcodeop decoratedStore;
+
+:lbdx D,A,B		is $(ISVLE) & OP=31 & D & A & B & XOP_1_10=515 & BIT_0=0 {
+	local value:1 = decoratedLoad(A, B);
+	D = zext(value);
+}
+:lhdx D,A,B		is $(ISVLE) & OP=31 & D & A & B & XOP_1_10=547 & BIT_0=0 {
+	local value:2 = decoratedLoad(A, B);
+	D = zext(value);
+}
+:lwdx D,A,B		is $(ISVLE) & OP=31 & D & A & B & XOP_1_10=579 & BIT_0=0 {
+	D = decoratedLoad(A, B);
+}
+:stbdx S,A,B	is $(ISVLE) & OP=31 & S & A & B & XOP_1_10=643 & BIT_0=0 {
+	decoratedStore(A, B, S:1);
+}
+:sthdx S,A,B	is $(ISVLE) & OP=31 & S & A & B & XOP_1_10=675 & BIT_0=0 {
+	decoratedStore(A, B, S:2);
+}
+:stwdx S,A,B	is $(ISVLE) & OP=31 & S & A & B & XOP_1_10=707 & BIT_0=0 {
+	decoratedStore(A, B, S);
+}
+
+# Cache bypass forms (binutils E200Z4 opcodes, "Cache Bypass Storage" in IDA)
+define pcodeop decoratedLoadCacheBypass;
+define pcodeop decoratedStoreCacheBypass;
+
+:lbdcbx D,A,B	is $(ISVLE) & OP=31 & D & A & B & XOP_1_10=514 & BIT_0=0 {
+	local value:1 = decoratedLoadCacheBypass(A, B);
+	D = zext(value);
+}
+:lhdcbx D,A,B	is $(ISVLE) & OP=31 & D & A & B & XOP_1_10=546 & BIT_0=0 {
+	local value:2 = decoratedLoadCacheBypass(A, B);
+	D = zext(value);
+}
+:lwdcbx D,A,B	is $(ISVLE) & OP=31 & D & A & B & XOP_1_10=578 & BIT_0=0 {
+	D = decoratedLoadCacheBypass(A, B);
+}
+:stbdcbx S,A,B	is $(ISVLE) & OP=31 & S & A & B & XOP_1_10=642 & BIT_0=0 {
+	decoratedStoreCacheBypass(A, B, S:1);
+}
+:sthdcbx S,A,B	is $(ISVLE) & OP=31 & S & A & B & XOP_1_10=674 & BIT_0=0 {
+	decoratedStoreCacheBypass(A, B, S:2);
+}
+:stwdcbx S,A,B	is $(ISVLE) & OP=31 & S & A & B & XOP_1_10=706 & BIT_0=0 {
+	decoratedStoreCacheBypass(A, B, S);
+}
+
+# ---- Wait for interrupt ----------------------------------------------------------
+define pcodeop waitForInterrupt;
+
+:wait		is $(ISVLE) & OP=31 & BITS_21_25=0 & BITS_11_20=0 & XOP_1_10=62 & BIT_0=0 {
+	waitForInterrupt();
+}
+
+# ---- Load/store multiple volatile machine check save/restore registers -----------
+# e_ldmvmcsrrw / e_stmvmcsrrw; binutils 2.42 names them e_lmvmcsrrw / e_stmvmcsrrw.
+:e_ldmvmcsrrw d8PlusRaOrZeroAddress	is $(ISVLE) & OP=6 & BITS_21_25=7 & XOP_8_VLE=0x10 & d8PlusRaOrZeroAddress {
+	tea = d8PlusRaOrZeroAddress;
+	loadReg(spr23a); # MCSRR0
+	loadReg(spr23b); # MCSRR1
+}
+:e_stmvmcsrrw d8PlusRaOrZeroAddress	is $(ISVLE) & OP=6 & BITS_21_25=7 & XOP_8_VLE=0x11 & d8PlusRaOrZeroAddress {
+	tea = d8PlusRaOrZeroAddress;
+	storeReg(spr23a); # MCSRR0
+	storeReg(spr23b); # MCSRR1
+}
+
+# ---- Instructions Ghidra only decodes outside VLE mode ----------------------------
+# nego is valid in VLE mode; Ghidra guards only this Rc=0 form with NOTVLE.
+:nego D,A		is $(ISVLE) & OP=31 & D & A & BITS_11_15=0 & OE=1 & XOP_1_9=104 & Rc=0 {
+	subOverflow(A, 1);
+	D = -A;
+}
+
+# ---- Operand forms Ghidra does not decode ------------------------------------------
+# lwarx with the exclusive access hint EH=1
+:lwarx D,RA_OR_ZERO,B,1	is OP=31 & D & RA_OR_ZERO & B & XOP_1_10=20 & BIT_0=1 {
+	ea:$(REGISTER_SIZE) = RA_OR_ZERO + B;
+	D = *:4(ea);
+}
+
+# dcbt/dcbtst with a cache target CT other than 0 (Ghidra decodes CT=0 only)
+:dcbt CT,RA_OR_ZERO,B	is OP=31 & CT & BITS_21_25!=0 & B & XOP_1_10=278 & BIT_0=0 & RA_OR_ZERO {
+	ea:$(REGISTER_SIZE) = RA_OR_ZERO + B;
+	dataCacheBlockTouch(ea);
+}
+:dcbtst CT,RA_OR_ZERO,B	is OP=31 & CT & BITS_21_25!=0 & B & XOP_1_10=246 & BIT_0=0 & RA_OR_ZERO {
+	ea:$(REGISTER_SIZE) = RA_OR_ZERO + B;
+	dataCacheBlockTouchForStore(ea);
+}
+
+# ---- Corrections ------------------------------------------------------------------
+# Ghidra's e_nop pattern does not check the Rc bit, so e_ori. r0,r0,0, which sets
+# cr0, decodes as e_nop. This pattern is more specific and takes precedence.
+:e_ori. A,S,SCALE	is $(ISVLE) & OP=6 & XOP_12_VLE=13 & BIT_11=1 & BITS_1_10=0 & BIT_0=0 & BITS_21_25=0 & BITS_16_20=0 & S & A & SCALE {
+	A = S | SCALE;
+	cr0flags(A);
+}
+
+# Ghidra names e_mull2i and the 16-bit immediate compares as record forms (e_cmp16i.
+# and so on). They have no record form: the compares always write cr0 and e_mull2i
+# writes no CR field. Each pair below is split on bit 31, which makes it more specific
+# than Ghidra's constructor, so these replace them with the same semantics.
+macro vleCompareSigned(a, b) {
+	cr0 = ((a s< b) << 3) | ((a s> b) << 2) | ((a == b) << 1) | (xer_so & 1);
+}
+macro vleCompareUnsigned(a, b) {
+	cr0 = ((a < b) << 3) | ((a > b) << 2) | ((a == b) << 1) | (xer_so & 1);
+}
+
+:e_mull2i A,SIMM16	is $(ISVLE) & OP=28 & XOP_11_VLE=20 & BIT_0=0 & A & SIMM16 { A = A * sext(SIMM16); }
+:e_mull2i A,SIMM16	is $(ISVLE) & OP=28 & XOP_11_VLE=20 & BIT_0=1 & A & SIMM16 { A = A * sext(SIMM16); }
+:e_cmp16i A,SIMM16	is $(ISVLE) & OP=28 & XOP_11_VLE=19 & BIT_0=0 & A & SIMM16 { vleCompareSigned(A, sext(SIMM16)); }
+:e_cmp16i A,SIMM16	is $(ISVLE) & OP=28 & XOP_11_VLE=19 & BIT_0=1 & A & SIMM16 { vleCompareSigned(A, sext(SIMM16)); }
+:e_cmpl16i A,IMM16	is $(ISVLE) & OP=28 & XOP_11_VLE=21 & BIT_0=0 & A & IMM16 { vleCompareUnsigned(A, zext(IMM16)); }
+:e_cmpl16i A,IMM16	is $(ISVLE) & OP=28 & XOP_11_VLE=21 & BIT_0=1 & A & IMM16 { vleCompareUnsigned(A, zext(IMM16)); }
+:e_cmph16i A,SIMM16	is $(ISVLE) & OP=28 & XOP_11_VLE=22 & BIT_0=0 & A & SIMM16 { vleCompareSigned(A:2, SIMM16); }
+:e_cmph16i A,SIMM16	is $(ISVLE) & OP=28 & XOP_11_VLE=22 & BIT_0=1 & A & SIMM16 { vleCompareSigned(A:2, SIMM16); }
+:e_cmphl16i A,IMM16	is $(ISVLE) & OP=28 & XOP_11_VLE=23 & BIT_0=0 & A & IMM16 { vleCompareUnsigned(A:2, IMM16); }
+:e_cmphl16i A,IMM16	is $(ISVLE) & OP=28 & XOP_11_VLE=23 & BIT_0=1 & A & IMM16 { vleCompareUnsigned(A:2, IMM16); }
+
+# ---- Unsigned saturated math (e200z425 rev 2, MPC5746R) ---------------------------
+# Not in any public manual or in GNU binutils. Encodings and semantics were derived from
+# production MPC5746R firmware and checked against IDA Pro; see Ghidra PR #8829.
+# Subtraction follows the subf convention: rD = rB - rA, saturating at 0.
+
+# e_addwus - Add Word Unsigned Saturate
+:e_addwus D,A,B		is $(ISVLE) & OP=31 & D & A & B & XOP_1_10=0x36A & BIT_0=0 {
+	tmpA:4 = A:4;
+	tmpB:4 = B:4;
+	tmpResult:4 = tmpA + tmpB;
+	if (!carry(tmpA, tmpB)) goto <no_overflow>;
+		D = 0xFFFFFFFF;
+		goto <done>;
+	<no_overflow>
+		D = zext(tmpResult);
+	<done>
+}
+
+# e_addhus - Add Halfword Unsigned Saturate
+:e_addhus D,A,B		is $(ISVLE) & OP=31 & D & A & B & XOP_1_10=0x3AA & BIT_0=0 {
+	tmpA:2 = A:2;
+	tmpB:2 = B:2;
+	tmpResult:2 = tmpA + tmpB;
+	if (!carry(tmpA, tmpB)) goto <no_overflow>;
+		D = 0xFFFF;
+		goto <done>;
+	<no_overflow>
+		D = zext(tmpResult);
+	<done>
+}
+
+# e_addbus - Add Byte Unsigned Saturate
+:e_addbus D,A,B		is $(ISVLE) & OP=31 & D & A & B & XOP_1_10=0x3EA & BIT_0=0 {
+	tmpA:1 = A:1;
+	tmpB:1 = B:1;
+	tmpResult:1 = tmpA + tmpB;
+	if (!carry(tmpA, tmpB)) goto <no_overflow>;
+		D = 0xFF;
+		goto <done>;
+	<no_overflow>
+		D = zext(tmpResult);
+	<done>
+}
+
+# e_subfhus - Subtract From Halfword Unsigned Saturate
+:e_subfhus D,A,B	is $(ISVLE) & OP=31 & D & A & B & XOP_1_10=0x3A8 & BIT_0=0 {
+	tmpA:2 = A:2;
+	tmpB:2 = B:2;
+	tmpResult:2 = tmpB - tmpA;
+	if (tmpA <= tmpB) goto <no_underflow>;
+		D = 0;
+		goto <done>;
+	<no_underflow>
+		D = zext(tmpResult);
+	<done>
+}
+
+# e_subfbus - Subtract From Byte Unsigned Saturate
+:e_subfbus D,A,B	is $(ISVLE) & OP=31 & D & A & B & XOP_1_10=0x3E8 & BIT_0=0 {
+	tmpA:1 = A:1;
+	tmpB:1 = B:1;
+	tmpResult:1 = tmpB - tmpA;
+	if (tmpA <= tmpB) goto <no_underflow>;
+		D = 0;
+		goto <done>;
+	<no_underflow>
+		D = zext(tmpResult);
+	<done>
+}
