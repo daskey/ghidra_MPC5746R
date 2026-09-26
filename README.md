@@ -38,6 +38,40 @@ separate files:
   - unsigned `char`
   - r2 and r13 (small data area bases) preserved
 
+### PowerPC e200 Constant Reference Analyzer
+
+`src/main/java/.../E200AddressAnalyzer.java` replaces Ghidra's PowerPC Constant Reference
+Analyzer (`PowerPCAddressAnalyzer`) for this language; the processor spec disables Ghidra's
+analyzer by default. It differs in these ways:
+
+- **Small data area bases.** It assumes the EABI bases r13 (`_SDA_BASE_`) and r2
+  (`_SDA2_BASE_`) in all executable memory, so accesses such as `e_lwz r3,-0x7ff0(r13)`
+  resolve to global variables instead of `unaff_r13 + -0x7ff0`. The values come from:
+  1. register values already set by the loader or with **Set Register Values** (these are
+     never changed)
+  2. the `_SDA_BASE_` and `_SDA2_BASE_` symbols
+  3. the startup code that loads the registers (`e_lis` with `e_add16i`, `e_addi`,
+     `e_or2i` or `e_add2i.`), found even when analysis does not reach it
+
+  If the startup code loads different values, for example in an image with a bootloader
+  and an application, nothing is assumed and the analysis log lists the values.
+- **VLE instructions.** No references are created from `e_lis`, which holds only the
+  upper half of an address, or from constants loaded with `e_li`, `se_li`, `se_bgeni`
+  and `se_bmaski`. Ghidra's analyzer checks only the classic `lis` and `li`.
+- **Switch tables.** Tables behind `se_bctr` are recovered, with VLE compares as the
+  bound on the index, also from flash images loaded into a writable block.
+- **Removed:** the PEF and ELF function descriptor handling (r2 as TOC, r30 as GOT), which
+  does not apply to the e200 EABI.
+
+On the test firmware, r13 and r2 come from startup code that analysis never reaches. The
+results:
+- 195 bogus references from `e_lis` disappear
+- about 4,400 small data accesses become references
+- analysis finds 1,036 more instructions and 22 more functions
+
+Accesses to RAM show as named globals; add an uninitialized RAM block to the memory map to
+give them data types.
+
 ## Installation
 
 Build the extension with Gradle and install the zip from `dist/` with
@@ -47,8 +81,9 @@ Build the extension with Gradle and install the zip from `dist/` with
 gradle -PGHIDRA_INSTALL_DIR=<absolute path to Ghidra>
 ```
 
-Alternatively clone this repository into `<Ghidra>/Ghidra/Extensions/`. Ghidra compiles the
-SLEIGH specification the first time the language is used.
+Alternatively clone this repository into `<Ghidra>/Ghidra/Extensions/`. That provides the
+language but not the analyzer, whose Java code the Gradle build compiles. Ghidra compiles
+the SLEIGH specification the first time the language is used.
 
 `version` in `extension.properties` is the Ghidra release whose PowerPC files are included.
 Ghidra warns when you install the extension into a different release.
@@ -116,6 +151,10 @@ Ghidra warns when you install the extension into a different release.
 | `tools/gen_pspec.py [--check]` | Generate `ppc_32_e200.pspec` |
 | `tools/gen_lsp.py [--check]` | Generate `e200_lsp.sinc` from `tools/lsp_opcodes.txt` |
 | `tools/lsp_test/` | Emulator tests of the LSP semantics |
+
+`E200AddressAnalyzer.java` is derived from Ghidra's
+`Ghidra/Processors/PowerPC/src/main/java/ghidra/app/plugin/core/analysis/PowerPCAddressAnalyzer.java`.
+When syncing, check that file for changes worth carrying over.
 
 ## Sources
 

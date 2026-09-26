@@ -75,6 +75,8 @@ def main():
     <property key="addressesDoNotAppearDirectlyInCode" value="true"/>
     <property key="emulateInstructionStateModifierClass" value="ghidra.program.emulation.PPCEmulateInstructionStateModifier"/>
     <property key="useropLibs" value="ppc"/>
+    <!-- Replaced by the PowerPC e200 Constant Reference Analyzer of this extension -->
+    <property key="Analyzers.PowerPC Constant Reference Analyzer" value="false"/>
   </properties>
 
   <programcounter register="pc"/>

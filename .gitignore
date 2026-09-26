@@ -13,3 +13,7 @@ lsp_tests.tsv
 lsp_tests.meta
 lsp_results.tsv
 __pycache__/
+
+# Eclipse and copied dependencies
+bin/
+lib/
