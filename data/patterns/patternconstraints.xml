@@ -1,0 +1,10 @@
+<patternconstraints>
+  <!-- Nested under Ghidra's PowerPC big-endian constraint, so that for the e200 language these
+       patterns replace PPC_BE_patterns.xml. Those match classic PowerPC encodings, which VLE
+       code does not use. -->
+  <language id="PowerPC:BE:*:*">
+    <language id="PowerPC:BE:32:VLE-e200">
+      <patternfile>e200_VLE_patterns.xml</patternfile>
+    </language>
+  </language>
+</patternconstraints>

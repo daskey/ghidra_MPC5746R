@@ -58,8 +58,13 @@ analyzer by default. It differs in these ways:
   3. the startup code that loads the registers (`e_lis` with `e_add16i`, `e_addi`,
      `e_or2i` or `e_add2i.`), found even when analysis does not reach it
 
-  If the startup code loads different values, for example in an image with a bootloader
-  and an application, nothing is assumed and the application log lists the values.
+  An image can hold several separately linked programs whose startup code loads
+  different values, for example a boot manager, a bootloader and an application. Each
+  value then applies to its own program: the span of the code that its startup code
+  reaches through branches and direct calls, extended to the erased flash (0xFF) that
+  separates it from the next program. Addresses between the code of two programs with no
+  erased flash between them get no value. The application log lists the range of each
+  value.
 - **VLE instructions.** No references are created from `e_lis`, which holds only the
   upper half of an address, or from constants loaded with `e_li`, `se_li`, `se_bgeni`
   and `se_bmaski`. Ghidra's analyzer checks only the classic `lis` and `li`.
@@ -73,6 +78,55 @@ results:
 - 195 bogus references from `e_lis` disappear
 - about 4,400 small data accesses become references
 - analysis finds 1,036 more instructions and 22 more functions
+
+The test bootloader image (64 KB) holds two programs, each with its own startup code:
+r13 = 0x40012000 and r2 = 0x08FA6254 in the first, r13 = 0x40011200 and r2 = 0x08FA9300 in
+the second. Earlier releases assumed neither register there. A combined bootloader and
+application image gets three ranges, split at the erased flash between the programs.
+
+### PowerPC e200 Entry Points
+
+`src/main/java/.../E200EntryPointAnalyzer.java` finds the entry points of raw flash
+images, which have no symbols:
+
+- **Boot headers.** The MPC57xx boot assist flash starts the cores from a boot header at
+  the start of a flash block: a word `0x005A....`, and at offsets 0x10-0x1C the reset
+  vectors of the cores. The analyzer checks the start of each memory block and every 16 KB
+  boundary, types the header as `MPC57xx_boot_header` and makes each reset vector a function
+  named `reset` (`reset_0`, `reset_1`, ... when the cores start at different addresses).
+- **Interrupt vectors.** The e200z4 takes interrupts at fixed offsets from IVPR, 16 bytes
+  apart, and startup code fills each vector with an `e_b` to its handler. At least 8 such
+  vectors from a 256-byte boundary are taken as a table: they are labeled
+  `IVOR0_CriticalInput` to `IVOR34_EfpuRoundException` and the handlers become functions.
+  The tables are recognized by their layout because startup code often passes the IVPR
+  value to a helper function, where constant propagation does not see it.
+
+### Function start patterns
+
+`data/patterns/e200_VLE_patterns.xml` replaces Ghidra's PowerPC big-endian function start
+patterns for this language. Those match classic PowerPC encodings (`stwu r1`, `mflr`,
+`blr`) that VLE code does not contain, and matched VLE code only by accident.
+`patternconstraints.xml` nests the language under Ghidra's `PowerPC:BE:*:*` constraint, so
+these patterns are used instead of Ghidra's, not in addition. They look for:
+- the prologues `se_mflr r0; se_stw r0,4(r1)`, `se_mflr r0; e_stwu r1,-X(r1)`,
+  `e_stwu r1,-X(r1)` and `mflr r0; e_stwu r1,-X(r1)`
+- after the end of another function: a return (`se_blr`, `se_rfi`, ...), `se_bctr`,
+  `se_b`, `e_b`, `se_nop` padding or erased flash
+- anywhere else, the longer prologues, when the code up to a return disassembles
+
+Results of the three changes (raw images, default analysis options):
+
+| Image | Functions | Instructions | References | Undefined bytes (not erased) |
+|---|---|---|---|---|
+| Bootloader, 64 KB | 10 → 656 | 158 → 16,540 | 63 → 6,733 | 53,654 → 10,113 |
+| Application, 3.9 MB | 6,381 → 12,771 | 301,962 → 401,441 | 133,608 → 178,819 | 738,844 → 472,124 |
+| Application (other release), 3.9 MB | 7,148 → 13,793 | 342,834 → 445,918 | 151,164 → 197,572 | 765,672 → 487,902 |
+
+None of the new functions lies inside a function the previous release found. Of the 6,391
+new functions in the first application, 3,695 are called directly, 1,001 are referenced
+otherwise (for example from pointer tables) and 1,695 are found only by their prologue.
+The decompiler warnings grow with the number of functions, and no new "bad instruction"
+warnings appear. Analysis of the application takes 63 s instead of 50 s.
 
 ### PowerPC e200 Global Data Types
 
@@ -140,7 +194,9 @@ Ghidra warns when you install the extension into a different release.
 ## Usage
 
 - Raw flash images: import with the **Raw Binary** loader, choose `PowerPC:BE:32:VLE-e200`
-  and set the base address where the image sits in the device's memory map.
+  and set the base address where the image sits in the device's memory map. Analysis
+  starts from the boot header, the interrupt vectors and the function prologues it finds;
+  an image with a bootloader and an application can be imported as one file.
 - RAM: the Global Data Types analyzer adds the MPC5746R RAM blocks at the end of the first
   analysis (see above). If you map memory yourself, do it after the first analysis for the
   same reason. A later full re-analysis with RAM mapped adds about 1,300 flash-to-RAM
@@ -159,8 +215,8 @@ Ghidra warns when you install the extension into a different release.
   Ghidra's p-code emulator, checked against an independent Python model of the manual's
   pseudo-RTL. All pass; see `tools/lsp_test`.
 - **Test firmware** (MPC5746R, 4 MB flash):
-  - analysis finds the same 300,927 instructions and 6,359 functions as the previous
-    release
+  - with Ghidra's PowerPC function start patterns, analysis finds the same 300,927
+    instructions and 6,359 functions as the previous release
   - decompiling the first 2,000 functions: no failures, and 553 decompiler warnings
     instead of 2,312
   - floating-point code decompiles to correct expressions; the previous release produced
@@ -195,8 +251,6 @@ Ghidra warns when you install the extension into a different release.
   - circular buffer indexes wrap at the end of the buffer
   - exceptions are not modelled
 - Decorated storage, cache bypass and MPU instructions are opaque p-code operations.
-- There are no VLE-specific function start patterns yet. Ghidra's PowerPC big-endian
-  patterns apply to this language.
 
 ## Maintenance
 

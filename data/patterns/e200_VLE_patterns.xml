@@ -1,0 +1,43 @@
+<patternlist>
+  <!-- Function starts in VLE code (e200 EABI). Instructions are halfword aligned. -->
+  <patternpairs totalbits="32" postbits="16">
+    <prepatterns>
+      <data>0x0004</data>                                <!-- se_blr -->
+      <data>0x0006</data>                                <!-- se_bctr -->
+      <data>0x0008</data>                                <!-- se_rfi -->
+      <data>0x0009</data>                                <!-- se_rfci -->
+      <data>0x000a</data>                                <!-- se_rfdi -->
+      <data>0x000b</data>                                <!-- se_rfmci -->
+      <data>0xe8 ........</data>                         <!-- se_b -->
+      <data>0111100. ........ ........ .......0</data>   <!-- e_b -->
+      <data>0x4400</data>                                <!-- se_nop, alignment -->
+      <data>0xffff</data>                                <!-- erased flash -->
+    </prepatterns>
+    <postpatterns>
+      <data>0x0080 0xd101</data>                         <!-- se_mflr r0; se_stw r0,0x4(r1) -->
+      <data>0x0080 0x1821 0x06 1.......</data>           <!-- se_mflr r0; e_stwu r1,-X(r1) -->
+      <data>0x1821 0x06 1.......</data>                  <!-- e_stwu r1,-X(r1) -->
+      <data>0x7c0802a6 0x1821 0x06 1.......</data>       <!-- mflr r0; e_stwu r1,-X(r1) -->
+      <align mark="0" bits="1"/>
+      <funcstart/>
+    </postpatterns>
+  </patternpairs>
+
+  <!-- The same prologues after anything else, such as data, when the code up to a return
+       disassembles -->
+  <pattern>
+    <data>0x0080 0xd101 0x1821 0x06 1.......</data>      <!-- se_mflr r0; se_stw r0,0x4(r1); e_stwu r1,-X(r1) -->
+    <align mark="0" bits="1"/>
+    <possiblefuncstart validcode="subroutine"/>
+  </pattern>
+  <pattern>
+    <data>0x0080 0x1821 0x06 1.......</data>             <!-- se_mflr r0; e_stwu r1,-X(r1) -->
+    <align mark="0" bits="1"/>
+    <possiblefuncstart validcode="subroutine"/>
+  </pattern>
+  <pattern>
+    <data>0x1821 0x06 1....... 0x0080</data>             <!-- e_stwu r1,-X(r1); se_mflr r0 -->
+    <align mark="0" bits="1"/>
+    <possiblefuncstart validcode="subroutine"/>
+  </pattern>
+</patternlist>

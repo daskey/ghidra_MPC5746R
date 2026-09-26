@@ -48,7 +48,8 @@ import ghidra.util.task.TaskMonitor;
  * <ul>
  * <li>assumes the EABI small data area bases in r13 ({@code _SDA_BASE_}) and r2
  * ({@code _SDA2_BASE_}) in all code, taken from existing register values, the symbols, or the
- * startup code that loads them, so that small data accesses resolve to addresses</li>
+ * startup code that loads them, so that small data accesses resolve to addresses. In an image
+ * with several programs, each program gets the values its own startup code loads.</li>
  * <li>recognizes VLE instructions: no references from {@code e_lis} (the upper half of an
  * address) or from {@code e_li}, {@code se_li}, {@code se_bgeni} and {@code se_bmaski}
  * constants, and switch table recovery at {@code se_bctr} with VLE compares as the guard</li>
@@ -70,7 +71,8 @@ public class E200AddressAnalyzer extends ConstantPropagationAnalyzer {
 		"Assume the EABI small data area base registers r13 (_SDA_BASE_) and r2 (_SDA2_BASE_)\n" +
 			"in all executable memory, unless they already have values there. The values come\n" +
 			"from the _SDA_BASE_ and _SDA2_BASE_ symbols or from the startup code that loads\n" +
-			"the registers, when there is only one such value.";
+			"the registers. When startup code loads different values, as in an image with a\n" +
+			"bootloader and an application, each value applies to the program that loads it.";
 	private static final boolean OPTION_DEFAULT_SDA = true;
 
 	private static final String OPTION_NAME_MARK_DUAL_INSTRUCTION =
@@ -105,6 +107,12 @@ public class E200AddressAnalyzer extends ConstantPropagationAnalyzer {
 		{ { "r13", "_SDA_BASE_" }, { "r2", "_SDA2_BASE_" } };
 
 	private static final int STARTUP_SEARCH_INSTRUCTIONS = 4;
+
+	/** Bound on the code traced from each startup load. */
+	private static final int MAX_REACHED_INSTRUCTIONS = 500_000;
+
+	/** Shortest run of erased flash taken as the boundary between two programs. */
+	private static final int MIN_ERASED_RUN = 16;
 
 	private boolean assumeSmallDataBases = OPTION_DEFAULT_SDA;
 	private boolean markupDualInstructionOption = OPTION_DEFAULT_MARK_DUAL_INSTRUCTION;
@@ -181,32 +189,231 @@ public class E200AddressAnalyzer extends ConstantPropagationAnalyzer {
 			if (reg == null || hasValues(program, reg, code)) {
 				continue; // set by the loader or the user
 			}
-			String source = base[1];
 			Long value = symbolValue(program, base[1]);
-			if (value == null) {
-				SortedMap<Long, List<Address>> loads = findStartupLoads(program, reg, monitor);
-				if (loads.size() != 1) {
-					if (loads.size() > 1) {
-						Msg.info(this, "Not assuming " + reg + ": the startup code loads " +
-							"different values " + describe(loads) + "; set its value with " +
-							"Set Register Values");
-					}
-					continue;
-				}
-				value = loads.firstKey();
-				source = "startup code at " + loads.get(value);
+			if (value != null) {
+				setValue(program, reg, code, value);
+				Msg.info(this, "Assuming " + reg + " = 0x" + Long.toHexString(value) + " (" +
+					base[1] + ") in all executable memory");
+				continue;
 			}
-			setValue(program, reg, code, value);
-			Msg.info(this, "Assuming " + reg + " = 0x" + Long.toHexString(value) + " (" + source +
-				") in all executable memory");
+			SortedMap<Long, List<Address>> loads = findStartupLoads(program, reg, monitor);
+			if (loads.size() == 1) {
+				value = loads.firstKey();
+				setValue(program, reg, code, value);
+				Msg.info(this, "Assuming " + reg + " = 0x" + Long.toHexString(value) +
+					" (startup code at " + loads.get(value) + ") in all executable memory");
+			}
+			else if (loads.size() > 1) {
+				assumePerProgram(program, reg, loads, code, monitor);
+			}
 		}
+	}
+
+	/**
+	 * Sets the values of a register that different startup code loads differently, as in an
+	 * image with several separately linked programs such as a boot manager, a bootloader and an
+	 * application. Each value applies to the program whose startup code loads it: the span of
+	 * the code that the startup code reaches, extended to the erased flash that separates it
+	 * from the next program. Code between programs without erased flash gets no value.
+	 */
+	private void assumePerProgram(Program program, Register reg,
+			SortedMap<Long, List<Address>> loads, AddressSetView code, TaskMonitor monitor)
+			throws CancelledException {
+		Set<Address> sites = new HashSet<>();
+		loads.values().forEach(sites::addAll);
+
+		// the code each value's startup code reaches, without the code reached with other values
+		Map<Long, AddressSet> reached = new HashMap<>();
+		PseudoDisassembler disassembler = new PseudoDisassembler(program);
+		for (Map.Entry<Long, List<Address>> entry : loads.entrySet()) {
+			AddressSet set = new AddressSet();
+			for (Address site : entry.getValue()) {
+				set.add(reachedCode(disassembler, site, sites, code, monitor));
+			}
+			reached.put(entry.getKey(), set);
+		}
+		Map<Long, AddressSet> own = new HashMap<>();
+		for (Map.Entry<Long, AddressSet> entry : reached.entrySet()) {
+			AddressSet set = new AddressSet(entry.getValue());
+			for (Map.Entry<Long, AddressSet> other : reached.entrySet()) {
+				if (!other.getKey().equals(entry.getKey())) {
+					set.delete(other.getValue());
+				}
+			}
+			own.put(entry.getKey(), set);
+		}
+
+		Map<Long, AddressSet> regions = partition(program, own, monitor);
+		for (Map.Entry<Long, AddressSet> entry : regions.entrySet()) {
+			AddressSet region = entry.getValue().intersect(code);
+			if (region.isEmpty()) {
+				continue;
+			}
+			long value = entry.getKey();
+			setValue(program, reg, region, value);
+			Msg.info(this, "Assuming " + reg + " = 0x" + Long.toHexString(value) +
+				" (startup code at " + loads.get(value) + ") in " + describe(region));
+		}
+	}
+
+	/**
+	 * Divides memory between values, given the code that belongs to each: a value gets the
+	 * addresses from its first to its last code in each memory block, where no other value's
+	 * code lies between. Between the code of two different values, the longest run of erased
+	 * bytes is the boundary; without one the addresses between get no value. Before the first
+	 * and after the last code of a block, a value extends to the end of the block.
+	 */
+	private static Map<Long, AddressSet> partition(Program program, Map<Long, AddressSet> own,
+			TaskMonitor monitor) throws CancelledException {
+		record Span(Address start, Address end, long value) {}
+
+		Map<Long, AddressSet> regions = new HashMap<>();
+		Memory memory = program.getMemory();
+		for (MemoryBlock block : memory.getBlocks()) {
+			AddressSet blockSet = new AddressSet(block.getStart(), block.getEnd());
+			// merge the ranges of the same value that follow each other
+			List<Span> spans = new ArrayList<>();
+			TreeMap<Address, Span> ranges = new TreeMap<>();
+			for (Map.Entry<Long, AddressSet> entry : own.entrySet()) {
+				for (AddressRange range : entry.getValue().intersect(blockSet)) {
+					ranges.put(range.getMinAddress(),
+						new Span(range.getMinAddress(), range.getMaxAddress(), entry.getKey()));
+				}
+			}
+			for (Span span : ranges.values()) {
+				Span last = spans.isEmpty() ? null : spans.get(spans.size() - 1);
+				if (last != null && last.value() == span.value()) {
+					spans.set(spans.size() - 1, new Span(last.start(), span.end(), span.value()));
+				}
+				else {
+					spans.add(span);
+				}
+			}
+			if (spans.isEmpty()) {
+				continue;
+			}
+			Address start = block.getStart();
+			for (int i = 0; i < spans.size(); i++) {
+				monitor.checkCancelled();
+				Span span = spans.get(i);
+				Address end = block.getEnd();
+				Address next = null;
+				if (i + 1 < spans.size()) {
+					AddressRange gap = new AddressRangeImpl(span.end(), spans.get(i + 1).start());
+					AddressRange erased = longestErasedRun(memory, gap);
+					if (erased != null) {
+						end = erased.getMinAddress().previous();
+						next = erased.getMaxAddress().next();
+					}
+					else {
+						end = span.end();
+						next = spans.get(i + 1).start();
+					}
+				}
+				if (start != null && end != null && start.compareTo(end) <= 0) {
+					regions.computeIfAbsent(span.value(), v -> new AddressSet()).add(start, end);
+				}
+				start = next;
+			}
+		}
+		return regions;
+	}
+
+	/**
+	 * Longest run of at least {@link #MIN_ERASED_RUN} erased (0xFF) bytes strictly inside
+	 * {@code range}, or null if there is none.
+	 */
+	private static AddressRange longestErasedRun(Memory memory, AddressRange range) {
+		Address first = range.getMinAddress().next();
+		Address last = range.getMaxAddress().previous();
+		if (first == null || last == null || first.compareTo(last) > 0) {
+			return null;
+		}
+		byte[] bytes = new byte[0x10000];
+		Address bestStart = null;
+		long bestLength = MIN_ERASED_RUN - 1;
+		Address runStart = null;
+		long runLength = 0;
+		Address address = first;
+		while (address != null && address.compareTo(last) <= 0) {
+			int len = (int) Math.min(bytes.length, last.subtract(address) + 1);
+			int got;
+			try {
+				got = memory.getBytes(address, bytes, 0, len);
+			}
+			catch (MemoryAccessException e) {
+				return null;
+			}
+			for (int i = 0; i < got; i++) {
+				if (bytes[i] == (byte) 0xff) {
+					if (runLength++ == 0) {
+						runStart = address.add(i);
+					}
+					if (runLength > bestLength) {
+						bestLength = runLength;
+						bestStart = runStart;
+					}
+				}
+				else {
+					runLength = 0;
+				}
+			}
+			if (got < len) {
+				return null;
+			}
+			address = address.addWrap(got);
+			if (address.compareTo(first) <= 0) {
+				break; // wrapped
+			}
+		}
+		return bestStart == null ? null
+				: new AddressRangeImpl(bestStart, bestStart.add(bestLength - 1));
+	}
+
+	/**
+	 * Code reached from {@code start} by following fallthroughs, branches and direct calls,
+	 * stopping at other {@code sites} and at bytes that are not instructions.
+	 */
+	private static AddressSet reachedCode(PseudoDisassembler disassembler, Address start,
+			Set<Address> sites, AddressSetView code, TaskMonitor monitor)
+			throws CancelledException {
+		AddressSet reached = new AddressSet();
+		Deque<Address> todo = new ArrayDeque<>();
+		todo.push(start);
+		int count = 0;
+		while (!todo.isEmpty() && count < MAX_REACHED_INSTRUCTIONS) {
+			monitor.checkCancelled();
+			Address at = todo.pop();
+			while (at != null && code.contains(at) && !reached.contains(at) &&
+				(at.equals(start) || !sites.contains(at))) {
+				PseudoInstruction ins;
+				try {
+					ins = disassembler.disassemble(at);
+				}
+				catch (Exception e) {
+					break;
+				}
+				if (ins == null || ins.getMnemonicString().equals("se_illegal")) {
+					break; // not code, such as erased or zeroed flash
+				}
+				reached.add(ins.getMinAddress(), ins.getMaxAddress());
+				if (++count >= MAX_REACHED_INSTRUCTIONS) {
+					break;
+				}
+				for (Address target : ins.getFlows()) {
+					todo.push(target);
+				}
+				at = ins.getFallThrough();
+			}
+		}
+		return reached;
 	}
 
 	/**
 	 * Executable memory with initialized bytes, or all initialized memory if no block is
 	 * marked executable.
 	 */
-	private static AddressSetView executableMemory(Program program) {
+	static AddressSetView executableMemory(Program program) {
 		Memory memory = program.getMemory();
 		AddressSet set = new AddressSet();
 		for (MemoryBlock block : memory.getBlocks()) {
@@ -295,7 +502,7 @@ public class E200AddressAnalyzer extends ConstantPropagationAnalyzer {
 						continue;
 					}
 					Long value = startupLoad(disassembler, at, reg);
-					if (value != null) {
+					if (value != null && value != 0) {
 						loads.computeIfAbsent(value, v -> new ArrayList<>()).add(at);
 					}
 				}
@@ -363,14 +570,16 @@ public class E200AddressAnalyzer extends ConstantPropagationAnalyzer {
 		return false;
 	}
 
-	private static String describe(SortedMap<Long, List<Address>> loads) {
-		StringBuilder sb = new StringBuilder();
-		loads.forEach((value, at) -> sb.append(sb.length() == 0 ? "" : ", ")
-				.append("0x")
-				.append(Long.toHexString(value))
-				.append(" at ")
-				.append(at));
-		return sb.toString();
+	private static String describe(AddressSetView set) {
+		if (set.getNumAddressRanges() > 3) {
+			return set.getNumAddressRanges() + " ranges from " + set.getMinAddress() + " to " +
+				set.getMaxAddress();
+		}
+		StringJoiner joiner = new StringJoiner(", ");
+		for (AddressRange range : set) {
+			joiner.add(range.getMinAddress() + "-" + range.getMaxAddress());
+		}
+		return joiner.toString();
 	}
 
 	// ---- Constant propagation ---------------------------------------------------------------
