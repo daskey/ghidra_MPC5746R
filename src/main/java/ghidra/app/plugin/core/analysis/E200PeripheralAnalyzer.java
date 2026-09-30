@@ -18,6 +18,8 @@ package ghidra.app.plugin.core.analysis;
 import java.io.*;
 import java.util.*;
 import java.util.function.Supplier;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import java.util.zip.GZIPInputStream;
 
 import generic.jar.ResourceFile;
@@ -160,6 +162,9 @@ public class E200PeripheralAnalyzer extends AbstractAnalyzer {
 
 		/** Names of an array of register groups and of the group's registers. */
 		private record GroupNames(String name, List<String> members) {}
+
+		/** A register name with a number at the end, as in {@code CPR0} or {@code LOCK12}. */
+		private static final Pattern NUMBERED = Pattern.compile("(.*[A-Za-z_])(0|[1-9]\\d*)");
 
 		private final Program program;
 		private final SvdDevice device;
@@ -416,7 +421,7 @@ public class E200PeripheralAnalyzer extends AbstractAnalyzer {
 		private List<Component> components(Peripheral p, String baseName) {
 			List<Component> components = new ArrayList<>();
 			Map<String, List<Register>> strided = new LinkedHashMap<>();
-			for (Register r : p.registers()) {
+			for (Register r : numberedArrays(p.registers())) {
 				String name = trimUnderscores(r.name().replace("%s", ""));
 				String typeName = baseName + "_" + name;
 				if (r.dim() <= 1) {
@@ -533,6 +538,66 @@ public class E200PeripheralAnalyzer extends AbstractAnalyzer {
 				return null;
 			}
 			return new GroupNames(name, members);
+		}
+
+		/**
+		 * Registers the SVD lists one by one as {@code NAME0}, {@code NAME1}, ... at consecutive
+		 * addresses, such as INTC's {@code CPR0} and {@code CPR1} (one for each core), as one
+		 * array {@code NAME%s}. Code indexes them, for example with the core number, and the
+		 * decompiler then shows {@code INTC.CPR[core]} instead of an offset from another
+		 * register. Elements whose fields differ, such as the channel masks of the ADC, get no
+		 * fields.
+		 */
+		private static List<Register> numberedArrays(List<Register> registers) {
+			Map<String, List<Register>> runs = new LinkedHashMap<>();
+			for (Register r : registers) {
+				Matcher m = NUMBERED.matcher(r.name());
+				if (r.dim() <= 1 && !r.alternate() && m.matches()) {
+					runs.computeIfAbsent(m.group(1), k -> new ArrayList<>()).add(r);
+				}
+			}
+			Set<Register> merged = new HashSet<>();
+			List<Register> arrays = new ArrayList<>();
+			for (Map.Entry<String, List<Register>> run : runs.entrySet()) {
+				List<Register> list = run.getValue();
+				list.sort(Comparator.comparingLong(Register::offset));
+				Register first = list.get(0);
+				boolean array = list.size() >= 2;
+				for (int i = 0; array && i < list.size(); i++) {
+					Register r = list.get(i);
+					array = r.name().equals(run.getKey() + i) && r.size() == first.size() &&
+						r.offset() == first.offset() + (long) i * first.size();
+				}
+				if (!array) {
+					continue;
+				}
+				List<String> index = new ArrayList<>();
+				Set<List<Field>> fields = new HashSet<>();
+				Set<String> descriptions = new LinkedHashSet<>();
+				for (int i = 0; i < list.size(); i++) {
+					index.add(Integer.toString(i));
+					fields.add(list.get(i).fields());
+					if (list.get(i).description() != null) {
+						descriptions.add(list.get(i).description());
+					}
+				}
+				arrays.add(new Register(run.getKey() + "%s",
+					descriptions.isEmpty() ? null : String.join(" / ", descriptions),
+					first.offset(), first.size(), list.size(), first.size(), index, false,
+					fields.size() == 1 ? first.fields() : List.of()));
+				merged.addAll(list);
+			}
+			if (merged.isEmpty()) {
+				return registers;
+			}
+			List<Register> out = new ArrayList<>();
+			for (Register r : registers) {
+				if (!merged.contains(r)) {
+					out.add(r);
+				}
+			}
+			out.addAll(arrays);
+			return out;
 		}
 
 		/** Adds each register of an array separately, named with its index. */
