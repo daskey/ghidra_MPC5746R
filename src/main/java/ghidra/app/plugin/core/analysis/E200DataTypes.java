@@ -20,8 +20,6 @@ import java.util.*;
 import ghidra.app.decompiler.*;
 import ghidra.app.decompiler.parallel.DecompilerCallback;
 import ghidra.app.decompiler.parallel.ParallelDecompiler;
-import ghidra.app.services.*;
-import ghidra.app.util.importer.MessageLog;
 import ghidra.framework.options.Options;
 import ghidra.framework.store.LockException;
 import ghidra.program.model.address.*;
@@ -40,7 +38,7 @@ import ghidra.util.task.TaskMonitor;
 /**
  * Gives global data of undefined type ({@code undefined1}, {@code undefined2},
  * {@code undefined4}, {@code undefined8}) the type the decompiler infers from the functions
- * that use it, for the NXP e200z4 VLE language ({@code PowerPC:BE:32:VLE-e200}).
+ * that use it (part of {@link E200Analyzer}).
  * <p>
  * The reference analysis creates such data wherever code loads or stores a global, knowing
  * only the access size. The decompiler usually knows more: a value used by {@code efs*}
@@ -72,16 +70,17 @@ import ghidra.util.task.TaskMonitor;
  * integer of their size.
  * <p>
  * New types change the decompiled code of the functions that use them, which then shows
- * more types: the analyzer decompiles those functions again, a few rounds at most.
+ * more types: the analyzer decompiles again those that still use undefined places or use a
+ * place now typed as a pointer, three rounds at most.
  */
-public class E200DataTypeAnalyzer extends AbstractAnalyzer {
+final class E200DataTypes {
 
-	private static final String NAME = "PowerPC e200 Data Types";
-	private static final String DESCRIPTION =
-		"Gives global data, parameters and return values of undefined type (undefined1,\n" +
+	private static final String OPTION_NAME = "Infer data types";
+	private static final String OPTION_DESCRIPTION =
+		"Give global data, parameters and return values of undefined type (undefined1,\n" +
 			"undefined2, undefined4 ...) the type the decompiler infers from the functions that\n" +
-			"use them or pass them on, such as float, ushort or int, when those uses agree.";
-
+			"use them or pass them on, such as float, ushort or int, when those uses agree.\n" +
+			"This decompiles every function, the longest part of the analysis.";
 	private static final String OPTION_NAME_RAM_BLOCKS = "Add MPC5746R RAM blocks";
 	private static final String OPTION_DESCRIPTION_RAM_BLOCKS =
 		"Add uninitialized blocks for the MPC5746R RAM that is not mapped, as in flash images\n" +
@@ -110,9 +109,9 @@ public class E200DataTypeAnalyzer extends AbstractAnalyzer {
 
 	private static final int DECOMPILER_TIMEOUT_SECONDS = 60;
 
+	private boolean enabled = true;
 	private boolean addRamBlocksOption = OPTION_DEFAULT_RAM_BLOCKS;
 	private boolean defaultsOption = true;
-
 
 	/** How code uses a global */
 	private enum Access {
@@ -130,56 +129,43 @@ public class E200DataTypeAnalyzer extends AbstractAnalyzer {
 	 */
 	private record Use(Address address, DataType type, int size, Access access) {}
 
-	/** What a decompiled function shows about globals and the values it passes on */
-	private record Result(Function function, List<Use> uses, E200TypeFlow.Facts facts) {}
+	/**
+	 * What a decompiled function shows about globals and the values it passes on, and the
+	 * globals it shows with no type
+	 */
+	private record Result(Function function, List<Use> uses, E200TypeFlow.Facts facts,
+			List<Address> untyped) {}
 
 	/** Rounds of typing, each with the functions whose code the last one changed */
 	private static final int MAX_ROUNDS = 3;
 
-	public E200DataTypeAnalyzer() {
-		super(NAME, DESCRIPTION, AnalyzerType.FUNCTION_ANALYZER);
-		// after Decompiler Parameter ID, whose prototypes give the decompiler more to go on and
-		// whose parameters and return values this types further, and the calling conventions
-		// of the PowerPC e200 Functions analyzer
-		setPriority(AnalysisPriority.DATA_TYPE_PROPOGATION.after().after().after().after());
-		setDefaultEnablement(true);
-		setSupportsOneTimeAnalysis();
-	}
-
-	@Override
-	public boolean canAnalyze(Program program) {
-		return E200AddressAnalyzer.LANGUAGE_ID.equals(program.getLanguageID().getIdAsString());
-	}
-
-	@Override
-	public void registerOptions(Options options, Program program) {
+	void registerOptions(Options options) {
+		options.registerOption(OPTION_NAME, enabled, null, OPTION_DESCRIPTION);
 		options.registerOption(OPTION_NAME_RAM_BLOCKS, addRamBlocksOption, null,
 			OPTION_DESCRIPTION_RAM_BLOCKS);
 		options.registerOption(OPTION_NAME_DEFAULTS, defaultsOption, null,
 			OPTION_DESCRIPTION_DEFAULTS);
 	}
 
-	@Override
-	public void optionsChanged(Options options, Program program) {
+	void optionsChanged(Options options) {
+		enabled = options.getBoolean(OPTION_NAME, enabled);
 		addRamBlocksOption = options.getBoolean(OPTION_NAME_RAM_BLOCKS, addRamBlocksOption);
 		defaultsOption = options.getBoolean(OPTION_NAME_DEFAULTS, defaultsOption);
 	}
 
-	@Override
-	public boolean added(Program program, AddressSetView set, TaskMonitor monitor,
-			MessageLog log) throws CancelledException {
-
+	/**
+	 * Adds the RAM blocks, at the end of analysis (see the class comment), and types the
+	 * globals, parameters and return values that the functions use.
+	 */
+	boolean apply(Program program, Set<Function> analyzed, TaskMonitor monitor)
+			throws CancelledException {
+		if (!enabled) {
+			return true;
+		}
 		if (addRamBlocksOption) {
 			AddressSetView ram = addRamBlocks(program);
 			if (!ram.isEmpty()) {
 				createAccessedData(program, ram, monitor);
-			}
-		}
-
-		Set<Function> analyzed = new HashSet<>();
-		for (Function f : program.getFunctionManager().getFunctions(set, true)) {
-			if (!f.isThunk() && !f.isExternal()) {
-				analyzed.add(f);
 			}
 		}
 		if (analyzed.isEmpty()) {
@@ -187,7 +173,7 @@ public class E200DataTypeAnalyzer extends AbstractAnalyzer {
 		}
 
 		try {
-			monitor.setMessage(NAME + " - decompiling");
+			monitor.setMessage(E200Analyzer.NAME + " - decompiling");
 			// their callers too, which show the types of the arguments
 			Set<Function> functions = new HashSet<>(analyzed);
 			for (Function f : analyzed) {
@@ -219,7 +205,7 @@ public class E200DataTypeAnalyzer extends AbstractAnalyzer {
 			// globals from their uses, arrays, places from values, places by default, voids
 			int[] typed = new int[5];
 			for (int round = 1; round <= MAX_ROUNDS; round++) {
-				monitor.setMessage(NAME + " - applying");
+				monitor.setMessage(E200Analyzer.NAME + " - applying");
 				Set<Address> changedGlobals = new HashSet<>();
 				Set<Function> changedFunctions = new HashSet<>();
 				if (typeRound(program, results.values(), functions, complete, changedGlobals,
@@ -228,12 +214,21 @@ public class E200DataTypeAnalyzer extends AbstractAnalyzer {
 				}
 				// the functions whose code the new types change
 				Set<Function> affected = using(program, changedGlobals);
+				Set<Function> pointing = using(program, pointers(program, changedGlobals));
 				for (Function f : changedFunctions) {
 					affected.add(f);
 					affected.addAll(callers(f, monitor));
+					if (hasPointer(f)) {
+						pointing.add(f);
+						pointing.addAll(callers(f, monitor));
+					}
 				}
 				affected.retainAll(results.keySet());
-				monitor.setMessage(NAME + " - decompiling again");
+				// only those that still use an undefined place, or a place now typed as a
+				// pointer, which shows the places it points to, can show more
+				affected.removeIf(
+					f -> !pointing.contains(f) && !usesOpenPlace(program, results.get(f)));
+				monitor.setMessage(E200Analyzer.NAME + " - decompiling again");
 				decompile(program, affected, results, monitor);
 			}
 			if (defaultsOption) {
@@ -362,6 +357,59 @@ public class E200DataTypeAnalyzer extends AbstractAnalyzer {
 		return changedGlobals.size() + changedFunctions.size();
 	}
 
+	/**
+	 * Whether a decompiled function uses a place that may still get a type: global data of
+	 * undefined type or an address without data, or a parameter or return value of undefined
+	 * type
+	 */
+	private static boolean usesOpenPlace(Program program, Result result) {
+		Listing listing = program.getListing();
+		for (Use use : result.uses()) {
+			Data data = listing.getDefinedDataAt(use.address());
+			if (data == null ? use.access() != Access.VALUE
+					: Undefined.isUndefined(data.getDataType())) {
+				return true;
+			}
+		}
+		for (Address addr : result.untyped()) {
+			Data data = listing.getDefinedDataAt(addr);
+			if (data == null || Undefined.isUndefined(data.getDataType())) {
+				return true;
+			}
+		}
+		for (Map.Entry<E200TypeFlow.Slot, DataType> t : result.facts().types) {
+			if (E200TypeFlow.open(program, t.getKey())) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	/** The globals typed as pointers */
+	private static Set<Address> pointers(Program program, Set<Address> globals) {
+		Set<Address> pointers = new HashSet<>();
+		for (Address addr : globals) {
+			Data data = program.getListing().getDefinedDataAt(addr);
+			if (data != null && data.getDataType() instanceof Pointer) {
+				pointers.add(addr);
+			}
+		}
+		return pointers;
+	}
+
+	/** Whether a function takes or returns a pointer */
+	private static boolean hasPointer(Function f) {
+		if (f.getReturnType() instanceof Pointer) {
+			return true;
+		}
+		for (Parameter p : f.getParameters()) {
+			if (p.getDataType() instanceof Pointer) {
+				return true;
+			}
+		}
+		return false;
+	}
+
 	/** The functions that reference the addresses */
 	private static Set<Function> using(Program program, Set<Address> addresses) {
 		Set<Function> using = new HashSet<>();
@@ -416,18 +464,18 @@ public class E200DataTypeAnalyzer extends AbstractAnalyzer {
 					MemoryBlock block = memory.createUninitializedBlock(name,
 						range.getMinAddress(), range.getLength(), false);
 					block.setPermissions(true, true, ram.execute());
-					block.setComment(ram.description() + ", added by " + NAME);
+					block.setComment(ram.description() + ", added by " + E200Analyzer.NAME);
 					added.add(range);
 					names.add(name);
 				}
 				catch (LockException | MemoryConflictException | AddressOverflowException e) {
-					Msg.info(E200DataTypeAnalyzer.class,
+					Msg.info(E200DataTypes.class,
 						"Could not add " + name + ": " + e.getMessage());
 				}
 			}
 		}
 		if (!names.isEmpty()) {
-			Msg.info(E200DataTypeAnalyzer.class, "Added RAM blocks " + String.join(", ", names));
+			Msg.info(E200DataTypes.class, "Added RAM blocks " + String.join(", ", names));
 		}
 		return added;
 	}
@@ -519,7 +567,7 @@ public class E200DataTypeAnalyzer extends AbstractAnalyzer {
 					HighFunction high = results.getHighFunction();
 					return high == null ? null
 							: new Result(results.getFunction(), globalUses(high),
-								E200TypeFlow.collect(high));
+								E200TypeFlow.collect(high), untypedGlobals(high));
 				}
 			};
 		callback.setTimeout(DECOMPILER_TIMEOUT_SECONDS);
@@ -594,6 +642,22 @@ public class E200DataTypeAnalyzer extends AbstractAnalyzer {
 			}
 		}
 		return created;
+	}
+
+	/** The globals a decompiled function reads or writes with an undefined type */
+	private static List<Address> untypedGlobals(HighFunction high) {
+		List<Address> untyped = new ArrayList<>();
+		Iterator<HighSymbol> it = high.getGlobalSymbolMap().getSymbols();
+		while (it.hasNext()) {
+			HighSymbol symbol = it.next();
+			HighVariable variable = symbol.getHighVariable();
+			if (variable != null && symbol.getStorage() != null &&
+				symbol.getStorage().isMemoryStorage() &&
+				Undefined.isUndefined(variable.getDataType())) {
+				untyped.add(symbol.getStorage().getMinAddress());
+			}
+		}
+		return untyped;
 	}
 
 	private static List<Use> globalUses(HighFunction high) {

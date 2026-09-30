@@ -29,7 +29,7 @@ import ghidra.util.task.TaskMonitor;
 
 /**
  * Types of the values that functions pass to each other (part of
- * {@link E200DataTypeAnalyzer}).
+ * {@link E200DataTypes}).
  * <p>
  * Decompiler Parameter ID commits the type the decompiler infers for a parameter or return
  * value from the function itself. A function that only copies a value, storing it, passing it
@@ -304,10 +304,10 @@ final class E200TypeFlow {
 		for (Slot s : slots) {
 			monitor.checkCancelled();
 			List<DataType> group = groups.get(find(parent, s));
-			DataType type = E200DataTypeAnalyzer.chooseType(
+			DataType type = E200DataTypes.chooseType(
 				informativeOnly(seen.getOrDefault(s, List.of())), signedChar, false);
 			if (type == null) {
-				type = E200DataTypeAnalyzer.chooseType(informativeOnly(group), signedChar, false);
+				type = E200DataTypes.chooseType(informativeOnly(group), signedChar, false);
 			}
 			List<Slot> list = typed.fromValues();
 			if (type == null) {
@@ -385,6 +385,19 @@ final class E200TypeFlow {
 		};
 	}
 
+	/**
+	 * Whether a place may still get a type: it is of undefined type, or a pointer to
+	 * undefined data (a return value of DEFAULT type is not known to exist)
+	 */
+	static boolean open(Program program, Slot s) {
+		DataType current = current(program, s);
+		if (current == null || current instanceof DefaultDataType) {
+			return false;
+		}
+		return Undefined.isUndefined(current) || current instanceof Pointer p &&
+			p.getDataType() != null && Undefined.isUndefined(p.getDataType());
+	}
+
 	/** The current type of a place, or null if it is not there */
 	private static DataType current(Program program, Slot s) {
 		if (s instanceof Global g) {
@@ -416,7 +429,7 @@ final class E200TypeFlow {
 				Data data = program.getListing().getDefinedDataAt(g.address());
 				return globals.contains(g.address()) && data != null &&
 					Undefined.isUndefined(data.getDataType()) &&
-					E200DataTypeAnalyzer.applyType(program, g.address(), type);
+					E200DataTypes.applyType(program, g.address(), type);
 			}
 			Function f = function(program, s);
 			if (f == null || !complete.contains(f) || f.isThunk() ||

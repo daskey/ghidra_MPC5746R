@@ -25,5 +25,5 @@ task distributeExtension {
 	dependsOn ':buildExtension'
 }
 
-// Keep local test output out of the zip
-buildExtension.exclude 'lsp_tests.*', 'lsp_results.tsv', '**/__pycache__/**'
+// Generators and tests for developing the module stay out of the zip
+buildExtension.exclude 'tools/**', 'lsp_tests.*', 'lsp_results.tsv', '**/__pycache__/**'

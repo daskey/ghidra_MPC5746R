@@ -42,9 +42,10 @@ import ghidra.util.exception.*;
 import ghidra.util.task.TaskMonitor;
 
 /**
- * Constant reference analyzer for the NXP e200z4 VLE language ({@code PowerPC:BE:32:VLE-e200}),
- * derived from Ghidra's {@code PowerPCAddressAnalyzer}, which the language's processor spec
- * disables. Compared with that analyzer it:
+ * Constant propagation for the NXP e200z4 VLE language ({@code PowerPC:BE:32:VLE-e200}), part
+ * of {@link E200Analyzer}. It is derived from Ghidra's {@code PowerPCAddressAnalyzer}, which
+ * the language's processor spec disables, and is not an analyzer of its own: Ghidra finds
+ * analyzers by the end of their class names. Compared with that analyzer it:
  * <ul>
  * <li>assumes the EABI small data area bases in r13 ({@code _SDA_BASE_}) and r2
  * ({@code _SDA2_BASE_}) in all code, taken from existing register values, the symbols, or the
@@ -59,10 +60,7 @@ import ghidra.util.task.TaskMonitor;
  * the e200 EABI</li>
  * </ul>
  */
-public class E200AddressAnalyzer extends ConstantPropagationAnalyzer {
-
-	/** Language handled by this analyzer. */
-	public static final String LANGUAGE_ID = "PowerPC:BE:32:VLE-e200";
+final class E200ConstantPropagation extends ConstantPropagationAnalyzer {
 
 	private static final String PROCESSOR_NAME = "PowerPC e200";
 
@@ -74,14 +72,6 @@ public class E200AddressAnalyzer extends ConstantPropagationAnalyzer {
 			"the registers. When startup code loads different values, as in an image with a\n" +
 			"bootloader and an application, each value applies to the program that loads it.";
 	private static final boolean OPTION_DEFAULT_SDA = true;
-
-	private static final String OPTION_NAME_MARK_DUAL_INSTRUCTION =
-		"Mark dual instruction references";
-	private static final String OPTION_DESCRIPTION_MARK_DUAL_INSTRUCTION =
-		"Turn on to mark all potential dual instruction references\n" +
-			"(e_lis followed by e_add16i, e_addi, e_or2i or e_add2i.)\n" +
-			"even if they are not seen to be used as a reference.";
-	private static final boolean OPTION_DEFAULT_MARK_DUAL_INSTRUCTION = false;
 
 	private static final String SWITCH_OPTION_NAME = "Switch Table Recovery";
 	private static final String SWITCH_OPTION_DESCRIPTION = "Turn on to recover switch tables";
@@ -120,19 +110,18 @@ public class E200AddressAnalyzer extends ConstantPropagationAnalyzer {
 	private static final int COPY_SAMPLE_DISTINCT = 8;
 
 	private boolean assumeSmallDataBases = OPTION_DEFAULT_SDA;
-	private boolean markupDualInstructionOption = OPTION_DEFAULT_MARK_DUAL_INSTRUCTION;
 	private boolean recoverSwitchTables = SWITCH_OPTION_DEFAULT_VALUE;
 
 	/** The executable memory for which the small data area bases were last assumed. */
 	private AddressSetView smallDataBasesCheckedFor;
 
-	public E200AddressAnalyzer() {
+	public E200ConstantPropagation() {
 		super(PROCESSOR_NAME);
 	}
 
 	@Override
 	public boolean canAnalyze(Program program) {
-		if (!LANGUAGE_ID.equals(program.getLanguageID().getIdAsString())) {
+		if (!E200Analyzer.LANGUAGE_ID.equals(program.getLanguageID().getIdAsString())) {
 			return false;
 		}
 		// the defaults the base analyzer derives from the address space
@@ -151,8 +140,6 @@ public class E200AddressAnalyzer extends ConstantPropagationAnalyzer {
 
 		options.registerOption(OPTION_NAME_SDA, assumeSmallDataBases, null,
 			OPTION_DESCRIPTION_SDA);
-		options.registerOption(OPTION_NAME_MARK_DUAL_INSTRUCTION, markupDualInstructionOption, null,
-			OPTION_DESCRIPTION_MARK_DUAL_INSTRUCTION);
 		options.registerOption(SWITCH_OPTION_NAME, recoverSwitchTables, null,
 			SWITCH_OPTION_DESCRIPTION);
 	}
@@ -162,8 +149,6 @@ public class E200AddressAnalyzer extends ConstantPropagationAnalyzer {
 		super.optionsChanged(options, program);
 
 		assumeSmallDataBases = options.getBoolean(OPTION_NAME_SDA, assumeSmallDataBases);
-		markupDualInstructionOption =
-			options.getBoolean(OPTION_NAME_MARK_DUAL_INSTRUCTION, markupDualInstructionOption);
 		recoverSwitchTables = options.getBoolean(SWITCH_OPTION_NAME, recoverSwitchTables);
 	}
 
@@ -172,7 +157,7 @@ public class E200AddressAnalyzer extends ConstantPropagationAnalyzer {
 			throws CancelledException {
 		if (assumeSmallDataBases) {
 			// first, and again when memory is added, such as dumps of more of the device
-			AddressSetView code = executableMemory(program);
+			AddressSetView code = E200Analyzer.executableMemory(program);
 			if (!code.equals(smallDataBasesCheckedFor)) {
 				smallDataBasesCheckedFor = code;
 				assumeSmallDataBases(program, code, monitor);
@@ -488,24 +473,6 @@ public class E200AddressAnalyzer extends ConstantPropagationAnalyzer {
 		return reached;
 	}
 
-	/**
-	 * Executable memory with initialized bytes, or all initialized memory if no block is
-	 * marked executable.
-	 */
-	static AddressSetView executableMemory(Program program) {
-		Memory memory = program.getMemory();
-		AddressSet set = new AddressSet();
-		for (MemoryBlock block : memory.getBlocks()) {
-			if (block.isExecute() && block.isInitialized()) {
-				set.add(block.getStart(), block.getEnd());
-			}
-		}
-		if (set.isEmpty()) {
-			set.add(memory.getLoadedAndInitializedAddressSet());
-		}
-		return set;
-	}
-
 	private Long symbolValue(Program program, String name) {
 		Symbol symbol = SymbolUtilities.getLabelOrFunctionSymbol(program, name,
 			err -> Msg.info(this, err));
@@ -542,7 +509,7 @@ public class E200AddressAnalyzer extends ConstantPropagationAnalyzer {
 		Listing listing = program.getListing();
 		PseudoDisassembler disassembler = new PseudoDisassembler(program);
 		byte[] bytes = new byte[0x10000];
-		for (AddressRange range : executableMemory(program)) {
+		for (AddressRange range : E200Analyzer.executableMemory(program)) {
 			Address address = range.getMinAddress();
 			// instructions are halfword aligned
 			if ((address.getOffset() & 1) != 0) {
@@ -666,14 +633,6 @@ public class E200AddressAnalyzer extends ConstantPropagationAnalyzer {
 				}
 
 				@Override
-				public boolean evaluateContext(VarnodeContext context, Instruction instr) {
-					if (markupDualInstructionOption) {
-						markupDualInstruction(program, context, instr);
-					}
-					return false;
-				}
-
-				@Override
 				public boolean evaluateReference(VarnodeContext context, Instruction instr,
 						int pcodeop, Address address, int size, DataType dataType,
 						RefType refType) {
@@ -771,32 +730,6 @@ public class E200AddressAnalyzer extends ConstantPropagationAnalyzer {
 			mnemonic = mnemonic.substring(underscore + 1);
 		}
 		return mnemonic.startsWith("l") || mnemonic.startsWith("st");
-	}
-
-	/**
-	 * Marks the operand that completes an address loaded with e_lis (e_add16i, e_or2i, ...),
-	 * even where the address is not seen to be used.
-	 */
-	private static void markupDualInstruction(Program program, VarnodeContext context,
-			Instruction instr) {
-		Integer lowOperand = LOW_HALF_OPERAND.get(instr.getMnemonicString());
-		if (lowOperand == null) {
-			return;
-		}
-		Register reg = instr.getRegister(0);
-		if (reg == null) {
-			return;
-		}
-		BigInteger val = context.getValue(reg, false);
-		if (val == null) {
-			return;
-		}
-		long lval = val.longValue();
-		Address refAddr = instr.getMinAddress().getNewTruncatedAddress(lval, true);
-		if ((lval > 4096 || lval < 0) && program.getMemory().contains(refAddr) &&
-			instr.getOperandReferences(lowOperand).length == 0) {
-			instr.addOperandReference(lowOperand, refAddr, RefType.DATA, SourceType.ANALYSIS);
-		}
 	}
 
 	private static boolean checkAlreadyRecovered(Program program, Address addr) {

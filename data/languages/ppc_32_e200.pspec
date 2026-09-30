@@ -8,8 +8,11 @@
          only adds AltiVec vperm, which the e200 lacks, and is in the stock PowerPC module,
          without which the emulator refused to start for this language. -->
     <property key="useropLibs" value="ppc"/>
-    <!-- Replaced by the PowerPC e200 Constant Reference Analyzer of this extension -->
+    <!-- Replaced by the constant propagation of this extension's PowerPC e200 analyzer.
+         Ghidra runs the Basic one for processors that no other claims, and without the
+         stock PowerPC module it would repeat the same constant propagation. -->
     <property key="Analyzers.PowerPC Constant Reference Analyzer" value="false"/>
+    <property key="Analyzers.Basic Constant Reference Analyzer" value="false"/>
     <!-- Function prototypes from the decompiler (Ghidra enables it only for Windows programs):
          parameter and return types, fewer undefined variables and casts -->
     <property key="Analyzers.Decompiler Parameter ID" value="true"/>

@@ -31,7 +31,7 @@ import ghidra.util.task.TaskMonitor;
 /**
  * Finds functions that nothing calls or references directly and that do not start with a
  * stack frame, such as getters, table lookup routines and small helpers reached only
- * through tables that analysis cannot follow (part of {@link E200FunctionAnalyzer}). Flow
+ * through tables that analysis cannot follow (part of {@link E200Functions}). Flow
  * analysis never reaches them and the function start patterns look for prologues, so they
  * stay undefined bytes between functions, or instructions of no function where a pointer in
  * data leads to them.
@@ -80,7 +80,7 @@ final class E200CodeGaps {
 	static int findFunctions(Program program, AddressSetView set, TaskMonitor monitor)
 			throws CancelledException {
 		Listing listing = program.getListing();
-		AddressSetView executable = E200AddressAnalyzer.executableMemory(program);
+		AddressSetView executable = E200Analyzer.executableMemory(program);
 		Set<Address> gaps = new TreeSet<>();
 		for (Function function : program.getFunctionManager().getFunctions(set, true)) {
 			for (AddressRange range : function.getBody()) {
@@ -170,7 +170,8 @@ final class E200CodeGaps {
 			code.putAll(body);
 			entries.add(a);
 		}
-		if (entries.isEmpty() || !internalTargetsAreInstructions(listing, disassembler, code, gap)) {
+		if (entries.isEmpty() ||
+			!internalTargetsAreInstructions(listing, disassembler, code, gap)) {
 			return List.of();
 		}
 		return entries;

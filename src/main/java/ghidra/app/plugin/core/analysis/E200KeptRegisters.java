@@ -43,7 +43,7 @@ import ghidra.util.task.TaskMonitor;
 
 /**
  * Calling conventions for functions that keep some of the volatile registers r0 and r3-r12,
- * where a caller relies on it (part of {@link E200FunctionAnalyzer}).
+ * where a caller relies on it (part of {@link E200Functions}).
  * <p>
  * The EABI lets a function change r0 and r3-r12, and Ghidra's calling convention says it does.
  * Compilers for the e200 know which registers the functions they compile change, and keep
@@ -85,15 +85,16 @@ final class E200KeptRegisters {
 
 	/**
 	 * Sets the calling conventions; returns false if the program's specification cannot be
-	 * extended, for example without exclusive access to a shared program.
+	 * extended, for example without exclusive access to a shared program. The functions whose
+	 * parameters Decompiler Parameter ID identified again are added to {@code identified}.
 	 * <p>
 	 * Decompiler Parameter ID, which ran before, took the kept registers a function reads after
 	 * a call for results of the call, and may have missed parameters. When it is enabled, it
 	 * runs again for the callers of the functions whose convention changed, and the conventions
 	 * are worked out again with their new signatures, a few rounds at most.
 	 */
-	static boolean apply(Program program, TaskMonitor monitor, MessageLog log, String source)
-			throws CancelledException {
+	static boolean apply(Program program, Set<Function> identified, TaskMonitor monitor,
+			MessageLog log, String source) throws CancelledException {
 		int changed = 0;
 		Set<String> added = new TreeSet<>();
 		// what the instructions read and write does not depend on the signatures
@@ -122,6 +123,7 @@ final class E200KeptRegisters {
 			if (callers.isEmpty() || !identifyParameters(program, callers, monitor)) {
 				break;
 			}
+			identified.addAll(callers);
 		}
 		if (changed > 0) {
 			Msg.info(E200KeptRegisters.class, "Set the calling convention of " + changed +
@@ -142,7 +144,8 @@ final class E200KeptRegisters {
 		if (function.getSignatureSource() == SourceType.USER_DEFINED ||
 			!ours && !current.equals(Function.UNKNOWN_CALLING_CONVENTION_STRING) &&
 				!current.equals(Function.DEFAULT_CALLING_CONVENTION_STRING) &&
-				!current.equals(program.getCompilerSpec().getDefaultCallingConvention().getName())) {
+				!current.equals(
+					program.getCompilerSpec().getDefaultCallingConvention().getName())) {
 			return false; // set by the user or otherwise
 		}
 		if (wanted == null) {
