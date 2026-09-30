@@ -212,7 +212,9 @@ def execute(mnemonic, operands, st, length):
         branch(st.lr & ~1, mnemonic == 'se_blrl')
         return r
     if mnemonic in ('se_bctr', 'se_bctrl'):
-        branch(st.ctr & ~1, mnemonic == 'se_bctrl')
+        if st.ctr & 1:
+            raise Skip('odd CTR: the p-code does not clear bit 0 (README)')
+        branch(st.ctr, mnemonic == 'se_bctrl')
         return r
 
     # -- loads and stores --

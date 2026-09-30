@@ -182,6 +182,19 @@ macro vleCompareUnsigned(a, b) {
 	call addrBD15;
 }
 
+# Branch to CTR. The hardware clears bit 0 of the target; Ghidra's p-code masks it with ~1,
+# so every call through a function pointer decompiled as (*(code *)((uint)p & 0xfffffffe))()
+# and lost the pointer's type. Compiled code never sets that bit, so these go to CTR as is.
+# linkreg=0 makes them more specific than Ghidra's constructors, which have no free bit;
+# linkreg is 1 only right after "mtspr LR".
+:se_bctr	is $(ISVLE) & linkreg=0 & OP15_VLE=3 & LK0_VLE=0 {
+	goto [CTR];
+}
+:se_bctrl	is $(ISVLE) & linkreg=0 & OP15_VLE=3 & LK0_VLE=1 {
+	LR = inst_next;
+	call [CTR];
+}
+
 # Rotate masks. MASK(MB, ME) with MB > ME wraps around: bits MB to 31 and 0 to ME. Ghidra's
 # mask left out bits MB and ME, so for example "e_rlwinm r3,r4,0,31,0" gave 0 instead of
 # r4 & 0x80000001. ((ME - MB) >> 8) & 1 is 1 when MB > ME.
