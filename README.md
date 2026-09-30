@@ -157,7 +157,7 @@ warnings appear. Analysis of the application takes 63 s instead of 50 s.
 ### PowerPC e200 Functions
 
 `src/main/java/.../E200FunctionAnalyzer.java` completes the functions after Decompiler
-Parameter ID, in two steps that its options turn on and off:
+Parameter ID, in three steps that its options turn on and off:
 
 - **Functions in gaps** (`E200CodeGaps.java`). Leaf functions without a stack frame that
   nothing calls directly, such as getters, setters and state machine handlers reached
@@ -186,7 +186,14 @@ Parameter ID, in two steps that its options turn on and off:
   Decompiler Parameter ID, which took the kept registers a caller reads after a call for
   results of the call, runs again for the callers whose view of a call changes, so that
   they get their missing parameters. Functions with a signature or calling convention set
-  otherwise are left alone.
+  otherwise are left alone. A thunk has the calling convention of the function it branches
+  to, so calls through it count as calls of that function.
+- **Interrupt handlers.** A handler saves the registers of the interrupted code and
+  restores them before its `se_rfi` (or `se_rfci`, `se_rfdi`, `se_rfmci`), r3 and r4 too.
+  Decompiler Parameter ID took them for parameters and a result, and a handler decompiled
+  as `undefined8 f(undefined4 param_1, undefined4 param_2)` ending in
+  `return CONCAT44(param_2, param_1)`. Functions whose returns are all interrupt returns
+  get the signature `void f(void)`, unless the user or an import set it.
 
 The analyzer takes about 17 seconds on the test firmware. On 11 flash images of it (several
 releases), analyzed with the default options and every function decompiled, this release
@@ -210,12 +217,13 @@ change the decompiled code of about 200 callers: `*extraout_r5 = x` becomes
 only new `unaff_` and `in_` variables are in the new functions, such as startup code that
 saves r14-r31.
 
-### PowerPC e200 Global Data Types
+### PowerPC e200 Data Types
 
-`src/main/java/.../E200DataTypeAnalyzer.java` gives global data of undefined type
-(`undefined1`, `undefined2`, `undefined4`, ...) the type the decompiler infers from the
-functions that use it. The reference analysis creates such data wherever code loads or
-stores a global, knowing only the access size.
+`src/main/java/.../E200DataTypeAnalyzer.java` gives global data, parameters and return
+values of undefined type (`undefined1`, `undefined2`, `undefined4`, ...) the type the
+decompiler infers from the functions that use them. The reference analysis creates such
+data wherever code loads or stores a global, knowing only the access size, and Decompiler
+Parameter ID commits `undefined4` for a parameter that the function only passes on.
 - A value used by `efs*` instructions becomes `float`, one that is sign extended becomes
   signed, one that is dereferenced becomes a pointer.
 - A type is applied only when the uses agree. A `float` use wins over integer uses of the
@@ -235,11 +243,13 @@ where nothing is mapped yet, and creates data of the accessed size where code re
 it. Around a dump of part of a RAM, the rest gets blocks named after the RAM and their
 start address, such as `SRAM_40000000`.
 
-Arrays in RAM that code indexes, loading or storing at their address plus an index, get
-data at their start, typed like other globals from the elements' uses. The decompiler then
-shows `(&BYTE_4000e46e)[i] = 0` instead of `*(undefined1 *)(i + 0x4000e46e) = 0`. On the
-test firmware that is 687 arrays, and such accesses through a bare address drop from 2,311
-to 15.
+Arrays that code indexes, loading or storing at their address plus an index, get data at
+their start, typed like other globals from the elements' uses. The decompiler then shows
+`(&BYTE_4000e46e)[i] = 0` instead of `*(undefined1 *)(i + 0x4000e46e) = 0`. The same goes
+for tables in flash, and for addresses that code uses as pointers to a type: a calibration
+table passed to an interpolation routine as a `short *` gets a `short` at its start, and the
+call reads `FUN_08faf3e0(&SHORT_09294ba0, x)` instead of
+`FUN_08faf3e0((short *)&DAT_09294ba0, x)`.
 
 | Block | Addresses | |
 |---|---|---|
@@ -262,6 +272,50 @@ after), and:
   instead of 2,422 (the rest access peripherals)
 - decompiled code has 70% fewer local variables of undefined type (3,349 to 1,017), 47%
   fewer undefined parameters (1,131 to 596) and 55% fewer `(float)` casts (2,631 to 1,189)
+
+**Values passed between functions** (`E200TypeFlow.java`). A function that only copies a
+value, storing it, passing it on or returning it, gives it no type, but the value has one
+where it comes from or goes to: the callers pass a `float` or the address of a `ushort`,
+the global it is stored in is an `int`. Global data, parameters and return values are
+linked where the decompiled code copies a value from one to another (an argument that is a
+parameter of the caller, a global or the result of another call; a returned value; a
+global assigned one of these), and each group of linked places gets the type all the types
+seen for them agree on, by the rules above except that a `float` does not win over
+integers. A parameter or return value is typed only when all the callers of its function
+were decompiled.
+
+New types change the decompiled code of the functions that use them, which then shows more
+types, so the analyzer decompiles those functions again, three rounds at most.
+
+**Unsigned types for untyped values.** What is then still undefined shows no type anywhere:
+AUTOSAR callbacks that fill a caller's `uint8` buffer, status codes that are only returned
+and compared with 0, flags that are only copied, wrappers that pass their parameters on.
+A value that is signed, a `float` or a pointer shows it in some use. The analyzer gives these
+places the unsigned integer of their size (`byte`, `ushort`, `uint`), and pointers to
+undefined data of 1, 2 or 4 bytes a pointer to it (`byte *`, ...), unless a value linked to
+them is a pointer, a `float` or of another size. Functions that return nothing, whose result
+no caller reads, get the return type `void`: Decompiler Parameter ID leaves it undefined, as
+it does not see the callers, and the listing showed `undefined FUN_...()` for three
+functions in four. The option **Unsigned types for untyped values** turns this off.
+
+The types from the values passed between functions, the tables and the unsigned types for
+untyped values change, on the test firmware (14,918 functions, all decompiled):
+
+| Test firmware | Before | After |
+|---|---|---|
+| Functions with `undefined` in their signature | 14,030 | 247 |
+| Parameters of undefined type or pointer to undefined | 7,841 | 167 |
+| Return values of undefined type | 2,646 | 9 |
+| Local variables of undefined type in the C | 2,435 | 731 |
+| `DAT_` references to RAM in the C | 12,777 | 527 |
+| `DAT_` references to flash in the C | 5,712 | 646 |
+| `*(undefinedN *)` casts in the C | 2,536 | 1,844 |
+| RAM data of undefined type | 4,885 | 477 |
+
+The analyzer typed 2,955 parameters, return values and globals from the values passed to
+them, gave 11,593 untyped ones an unsigned type and 11,115 functions a `void` return type.
+The decompiler warnings and failures do not change. The analyzer takes about 30 seconds
+more.
 
 ### PowerPC e200 Peripherals
 
