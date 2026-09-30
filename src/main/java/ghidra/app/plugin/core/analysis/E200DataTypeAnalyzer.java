@@ -59,18 +59,28 @@ import ghidra.util.task.TaskMonitor;
  * flash values such as the float 2.0 (0x40000000) or pairs of VLE instructions for
  * pointers into RAM.
  * <p>
- * Arrays in RAM that code indexes, loading or storing at their address plus an index, have
- * no reference to their start. They get data of the element size there too, typed from the
- * elements' uses, so that the decompiler shows {@code (&BYTE_4000e46e)[i]} instead of
- * {@code *(undefined1 *)(i + 0x4000e46e)}.
+ * Arrays that code indexes, loading or storing at their address plus an index, have no
+ * reference to their start, and tables in flash that code passes by address have no data.
+ * They get data of the element size or of the size of the pointer's target, typed from the
+ * uses, so that the decompiler shows {@code (&BYTE_4000e46e)[i]} instead of
+ * {@code *(undefined1 *)(i + 0x4000e46e)} and {@code &SHORT_09294ba0} instead of
+ * {@code (short *)&DAT_09294ba0}.
+ * <p>
+ * Parameters and return values that the functions only copy, and globals they are copied
+ * to and from, get the types the values have where they come from or go to (see
+ * {@link E200TypeFlow}). Optionally, those that show no type anywhere get the unsigned
+ * integer of their size.
+ * <p>
+ * New types change the decompiled code of the functions that use them, which then shows
+ * more types: the analyzer decompiles those functions again, a few rounds at most.
  */
 public class E200DataTypeAnalyzer extends AbstractAnalyzer {
 
-	private static final String NAME = "PowerPC e200 Global Data Types";
+	private static final String NAME = "PowerPC e200 Data Types";
 	private static final String DESCRIPTION =
-		"Gives global data of undefined type (undefined1, undefined2, undefined4 ...) the type\n" +
-			"the decompiler infers from the functions that use it, such as float, ushort or\n" +
-			"int, when those uses agree.";
+		"Gives global data, parameters and return values of undefined type (undefined1,\n" +
+			"undefined2, undefined4 ...) the type the decompiler infers from the functions that\n" +
+			"use them or pass them on, such as float, ushort or int, when those uses agree.";
 
 	private static final String OPTION_NAME_RAM_BLOCKS = "Add MPC5746R RAM blocks";
 	private static final String OPTION_DESCRIPTION_RAM_BLOCKS =
@@ -80,6 +90,12 @@ public class E200DataTypeAnalyzer extends AbstractAnalyzer {
 			"of the accessed size where code references them. The decompiler then shows RAM\n" +
 			"variables with their size instead of _DAT_... names, and this analyzer can type them.";
 	private static final boolean OPTION_DEFAULT_RAM_BLOCKS = true;
+	private static final String OPTION_NAME_DEFAULTS = "Unsigned types for untyped values";
+	private static final String OPTION_DESCRIPTION_DEFAULTS =
+		"Give parameters, return values and globals that no code gives a type, and that are\n" +
+			"not linked to a pointer, float or structure, the unsigned integer of their size\n" +
+			"(byte, ushort, uint), and pointers to undefined data a pointer to it (byte * ...).\n" +
+			"Functions that return nothing, whose result no caller reads, return void.";
 
 	/** A RAM region of the MPC5746R. */
 	private record RamBlock(String name, long start, long length, boolean execute,
@@ -95,19 +111,36 @@ public class E200DataTypeAnalyzer extends AbstractAnalyzer {
 	private static final int DECOMPILER_TIMEOUT_SECONDS = 60;
 
 	private boolean addRamBlocksOption = OPTION_DEFAULT_RAM_BLOCKS;
+	private boolean defaultsOption = true;
 
 
-	/** A global variable use seen by the decompiler: its address and the inferred type. */
+	/** How code uses a global */
+	private enum Access {
+		/** the value of the global symbol */
+		VALUE,
+		/** a load or store at its address plus an index, of an array */
+		INDEXED,
+		/** its address, as a pointer to the type */
+		ADDRESS
+	}
+
 	/**
-	 * A global variable use seen by the decompiler: its address and the inferred type, or an
-	 * access to an array through its address plus an index, with the access size.
+	 * A use of a global seen by the decompiler: its address, the inferred type and the size
+	 * of the access.
 	 */
-	private record Use(Address address, DataType type, int size, boolean array) {}
+	private record Use(Address address, DataType type, int size, Access access) {}
+
+	/** What a decompiled function shows about globals and the values it passes on */
+	private record Result(Function function, List<Use> uses, E200TypeFlow.Facts facts) {}
+
+	/** Rounds of typing, each with the functions whose code the last one changed */
+	private static final int MAX_ROUNDS = 3;
 
 	public E200DataTypeAnalyzer() {
 		super(NAME, DESCRIPTION, AnalyzerType.FUNCTION_ANALYZER);
-		// after Decompiler Parameter ID, whose prototypes give the decompiler more to go on,
-		// and the calling conventions of the PowerPC e200 Functions analyzer
+		// after Decompiler Parameter ID, whose prototypes give the decompiler more to go on and
+		// whose parameters and return values this types further, and the calling conventions
+		// of the PowerPC e200 Functions analyzer
 		setPriority(AnalysisPriority.DATA_TYPE_PROPOGATION.after().after().after().after());
 		setDefaultEnablement(true);
 		setSupportsOneTimeAnalysis();
@@ -122,11 +155,14 @@ public class E200DataTypeAnalyzer extends AbstractAnalyzer {
 	public void registerOptions(Options options, Program program) {
 		options.registerOption(OPTION_NAME_RAM_BLOCKS, addRamBlocksOption, null,
 			OPTION_DESCRIPTION_RAM_BLOCKS);
+		options.registerOption(OPTION_NAME_DEFAULTS, defaultsOption, null,
+			OPTION_DESCRIPTION_DEFAULTS);
 	}
 
 	@Override
 	public void optionsChanged(Options options, Program program) {
 		addRamBlocksOption = options.getBoolean(OPTION_NAME_RAM_BLOCKS, addRamBlocksOption);
+		defaultsOption = options.getBoolean(OPTION_NAME_DEFAULTS, defaultsOption);
 	}
 
 	@Override
@@ -140,65 +176,222 @@ public class E200DataTypeAnalyzer extends AbstractAnalyzer {
 			}
 		}
 
-		Set<Function> functions = new HashSet<>();
+		Set<Function> analyzed = new HashSet<>();
 		for (Function f : program.getFunctionManager().getFunctions(set, true)) {
 			if (!f.isThunk() && !f.isExternal()) {
-				functions.add(f);
+				analyzed.add(f);
 			}
 		}
-		if (functions.isEmpty()) {
+		if (analyzed.isEmpty()) {
 			return true;
 		}
 
 		try {
 			monitor.setMessage(NAME + " - decompiling");
-			Map<Address, List<DataType>> uses = new HashMap<>();
-			collectUses(program, functions, uses, monitor);
+			// their callers too, which show the types of the arguments
+			Set<Function> functions = new HashSet<>(analyzed);
+			for (Function f : analyzed) {
+				functions.addAll(callers(f, monitor));
+			}
+			Map<Function, Result> results = new HashMap<>();
+			decompile(program, functions, results, monitor);
 
 			// A type is only committed when all uses agree, so also look at the uses in
 			// functions outside the analyzed set.
-			Set<Function> others = new HashSet<>();
-			for (Address addr : uses.keySet()) {
-				for (Reference ref : program.getReferenceManager().getReferencesTo(addr)) {
-					Function f = program.getFunctionManager()
-							.getFunctionContaining(ref.getFromAddress());
-					if (f != null && !f.isThunk() && !functions.contains(f)) {
-						others.add(f);
-					}
+			Set<Address> globals = new HashSet<>();
+			for (Result r : results.values()) {
+				for (Use use : r.uses()) {
+					globals.add(use.address());
 				}
 			}
-			if (!others.isEmpty()) {
-				Map<Address, List<DataType>> otherUses = new HashMap<>();
-				collectUses(program, others, otherUses, monitor);
-				otherUses.forEach((addr, types) -> {
-					List<DataType> list = uses.get(addr);
-					if (list != null) {
-						list.addAll(types);
-					}
-				});
+			Set<Function> others = using(program, globals);
+			others.removeAll(results.keySet());
+			decompile(program, others, results, monitor);
+
+			// parameters and return values are typed only when all callers are decompiled
+			Set<Function> complete = new HashSet<>();
+			for (Function f : results.keySet()) {
+				if (results.keySet().containsAll(callers(f, monitor))) {
+					complete.add(f);
+				}
 			}
 
-			monitor.setMessage(NAME + " - applying");
-			int typed = 0;
-			for (Map.Entry<Address, List<DataType>> e : uses.entrySet()) {
-				monitor.checkCancelled();
-				DataType type = chooseType(e.getValue(),
-					program.getDataTypeManager().getDataOrganization().isSignedChar());
-				if (type != null && applyType(program, e.getKey(), type)) {
-					typed++;
+			// globals from their uses, arrays, places from values, places by default, voids
+			int[] typed = new int[5];
+			for (int round = 1; round <= MAX_ROUNDS; round++) {
+				monitor.setMessage(NAME + " - applying");
+				Set<Address> changedGlobals = new HashSet<>();
+				Set<Function> changedFunctions = new HashSet<>();
+				if (typeRound(program, results.values(), functions, complete, changedGlobals,
+					changedFunctions, false, typed, monitor) == 0) {
+					break;
 				}
+				// the functions whose code the new types change
+				Set<Function> affected = using(program, changedGlobals);
+				for (Function f : changedFunctions) {
+					affected.add(f);
+					affected.addAll(callers(f, monitor));
+				}
+				affected.retainAll(results.keySet());
+				monitor.setMessage(NAME + " - decompiling again");
+				decompile(program, affected, results, monitor);
 			}
-			if (typed > 0) {
-				Msg.info(this, "Typed " + typed + " global variables from their uses");
+			if (defaultsOption) {
+				typeRound(program, results.values(), functions, complete, new HashSet<>(),
+					new HashSet<>(), true, typed, monitor);
+			}
+			if (typed[1] > 0) {
+				Msg.info(this, "Created data at " + typed[1] +
+					" arrays that code indexes and addresses it uses as pointers");
+			}
+			if (typed[0] > 0) {
+				Msg.info(this, "Typed " + typed[0] + " global variables from their uses");
+			}
+			if (typed[2] > 0) {
+				Msg.info(this, "Typed " + typed[2] +
+					" parameters, return values and globals from the values passed to them");
+			}
+			if (typed[3] > 0) {
+				Msg.info(this, "Gave " + typed[3] +
+					" untyped parameters, return values and globals an unsigned type");
+			}
+			if (typed[4] > 0) {
+				Msg.info(this, "Gave " + typed[4] +
+					" functions that return nothing the return type void");
 			}
 		}
 		catch (CancelledException | InterruptedException e) {
 			throw new CancelledException();
 		}
 		catch (Exception e) {
-			Msg.error(this, "Global data type inference failed", e);
+			Msg.error(this, "Data type inference failed", e);
 		}
 		return true;
+	}
+
+	/**
+	 * Types globals from their uses, creates data at arrays and addresses used as pointers
+	 * and types places from the values passed to them, with what the decompiled functions
+	 * show, and optionally gives the untyped places default types. Only the globals that
+	 * the analyzed functions and their callers use are typed: the other decompiled functions
+	 * are there for the other uses of these globals.
+	 *
+	 * @param changedGlobals gets the globals typed or created
+	 * @param changedFunctions gets the functions whose parameters or return values are typed
+	 * @param defaults whether to give the places no code gives a type a default type
+	 * @param typed counts of globals typed, arrays created, places typed, places given a
+	 * default type and functions given a void return type, added to
+	 * @return the number of changes
+	 */
+	private static int typeRound(Program program, Collection<Result> results,
+			Set<Function> functions, Set<Function> complete, Set<Address> changedGlobals,
+			Set<Function> changedFunctions, boolean defaults, int[] typed, TaskMonitor monitor)
+			throws CancelledException {
+		Listing listing = program.getListing();
+		Set<Address> typable = new HashSet<>();
+		for (Result result : results) {
+			if (functions.contains(result.function())) {
+				for (Use use : result.uses()) {
+					typable.add(use.address());
+				}
+				typable.addAll(result.facts().globals());
+			}
+		}
+		Map<Address, List<DataType>> uses = new HashMap<>();
+		Map<Address, List<Use>> undefined = new TreeMap<>(); // uses where there is no data
+		List<E200TypeFlow.Facts> facts = new ArrayList<>();
+		// the types of the elements of arrays, for the default types
+		E200TypeFlow.Facts elements = new E200TypeFlow.Facts();
+		facts.add(elements);
+		for (Result result : results) {
+			facts.add(result.facts());
+			for (Use use : result.uses()) {
+				if (!typable.contains(use.address())) {
+					continue;
+				}
+				Data data = listing.getDefinedDataAt(use.address());
+				if (data == null && use.access() != Access.VALUE) {
+					undefined.computeIfAbsent(use.address(), a -> new ArrayList<>()).add(use);
+				}
+				else if (data != null && Undefined.isUndefined(data.getDataType()) &&
+					use.type() != null && use.type().getLength() == data.getLength()) {
+					if (!Undefined.isUndefined(use.type())) {
+						uses.computeIfAbsent(use.address(), a -> new ArrayList<>())
+								.add(use.type());
+					}
+					if (use.access() == Access.INDEXED) {
+						elements.type(new E200TypeFlow.Global(use.address()), use.type());
+					}
+				}
+			}
+		}
+		List<Address> created = createData(program, undefined, uses);
+		changedGlobals.addAll(created);
+		typed[1] += created.size();
+
+		boolean signedChar = program.getDataTypeManager().getDataOrganization().isSignedChar();
+		for (Map.Entry<Address, List<DataType>> e : uses.entrySet()) {
+			monitor.checkCancelled();
+			DataType type = chooseType(e.getValue(), signedChar, true);
+			if (type != null && applyType(program, e.getKey(), type)) {
+				changedGlobals.add(e.getKey());
+				typed[0]++;
+			}
+		}
+		FunctionManager manager = program.getFunctionManager();
+		E200TypeFlow.Typed flow =
+			E200TypeFlow.apply(program, facts, uses, typable, complete, defaults, monitor);
+		typed[2] += flow.fromValues().size();
+		typed[3] += flow.byDefault().size();
+		typed[4] += flow.voids().size();
+		for (E200TypeFlow.Slot slot : flow.fromValues()) {
+			Address function = null;
+			if (slot instanceof E200TypeFlow.Global g) {
+				changedGlobals.add(g.address());
+			}
+			else if (slot instanceof E200TypeFlow.Param p) {
+				function = p.function();
+			}
+			else if (slot instanceof E200TypeFlow.Return r) {
+				function = r.function();
+			}
+			if (function != null && manager.getFunctionAt(function) != null) {
+				changedFunctions.add(manager.getFunctionAt(function));
+			}
+		}
+		return changedGlobals.size() + changedFunctions.size();
+	}
+
+	/** The functions that reference the addresses */
+	private static Set<Function> using(Program program, Set<Address> addresses) {
+		Set<Function> using = new HashSet<>();
+		FunctionManager manager = program.getFunctionManager();
+		for (Address addr : addresses) {
+			for (Reference ref : program.getReferenceManager().getReferencesTo(addr)) {
+				Function f = manager.getFunctionContaining(ref.getFromAddress());
+				if (f != null && !f.isThunk()) {
+					using.add(f);
+				}
+			}
+		}
+		return using;
+	}
+
+	/** The functions that call a function, directly or through a thunk */
+	private static Set<Function> callers(Function f, TaskMonitor monitor) {
+		Set<Function> callers = new HashSet<>(f.getCallingFunctions(monitor));
+		Address[] thunks = f.getFunctionThunkAddresses(true);
+		if (thunks != null) {
+			FunctionManager manager = f.getProgram().getFunctionManager();
+			for (Address a : thunks) {
+				Function thunk = manager.getFunctionAt(a);
+				if (thunk != null) {
+					callers.addAll(thunk.getCallingFunctions(monitor));
+				}
+			}
+		}
+		callers.removeIf(c -> c.isThunk() || c.isExternal());
+		return callers;
 	}
 
 	/**
@@ -304,13 +497,15 @@ public class E200DataTypeAnalyzer extends AbstractAnalyzer {
 	}
 
 	/**
-	 * Decompiles the functions and adds the inferred type of each global variable they use
-	 * whose data is of undefined type.
+	 * Decompiles the functions and keeps, for each, the uses of globals and the facts about
+	 * the values it passes on.
 	 */
-	private void collectUses(Program program, Collection<Function> functions,
-			Map<Address, List<DataType>> uses, TaskMonitor monitor) throws Exception {
-
-		DecompilerCallback<List<Use>> callback =
+	private static void decompile(Program program, Collection<Function> functions,
+			Map<Function, Result> results, TaskMonitor monitor) throws Exception {
+		if (functions.isEmpty()) {
+			return;
+		}
+		DecompilerCallback<Result> callback =
 			new DecompilerCallback<>(program, decompiler -> {
 				DecompileOptions options = new DecompileOptions();
 				options.grabFromProgram(program);
@@ -320,61 +515,49 @@ public class E200DataTypeAnalyzer extends AbstractAnalyzer {
 				decompiler.setSimplificationStyle("decompile");
 			}) {
 				@Override
-				public List<Use> process(DecompileResults results, TaskMonitor m) {
-					return globalUses(results);
+				public Result process(DecompileResults results, TaskMonitor m) {
+					HighFunction high = results.getHighFunction();
+					return high == null ? null
+							: new Result(results.getFunction(), globalUses(high),
+								E200TypeFlow.collect(high));
 				}
 			};
 		callback.setTimeout(DECOMPILER_TIMEOUT_SECONDS);
-		List<List<Use>> results;
 		try {
-			results = ParallelDecompiler.decompileFunctions(callback, functions, monitor);
+			for (Result result : ParallelDecompiler.decompileFunctions(callback, functions,
+				monitor)) {
+				if (result != null) {
+					results.put(result.function(), result);
+				}
+			}
 		}
 		finally {
 			callback.dispose();
 		}
-
-		Listing listing = program.getListing();
-		Map<Address, List<Use>> arrays = new TreeMap<>();
-		for (List<Use> list : results) {
-			if (list == null) {
-				continue;
-			}
-			for (Use use : list) {
-				if (use.array()) {
-					arrays.computeIfAbsent(use.address(), a -> new ArrayList<>()).add(use);
-					continue;
-				}
-				Data data = listing.getDefinedDataAt(use.address());
-				if (data != null && Undefined.isUndefined(data.getDataType())) {
-					uses.computeIfAbsent(use.address(), a -> new ArrayList<>()).add(use.type());
-				}
-			}
-		}
-		int created = createArrayData(program, arrays, uses);
-		if (created > 0) {
-			Msg.info(this, "Created data at " + created + " RAM arrays that code indexes");
-		}
 	}
 
 	/**
-	 * Creates data of the element size at the start of RAM arrays that code accesses at their
-	 * address plus an index, where there is none, and adds the element types to the uses.
-	 * The decompiler then shows {@code (&BYTE_4000e46e)[i]} instead of
-	 * {@code *(byte *)(i + 0x4000e46e)}. The element size is the most frequent access size.
+	 * Creates data where code uses an address that has none: the start of arrays that code
+	 * accesses at their address plus an index, and addresses that code uses as pointers to a
+	 * type, such as a table in flash passed as a {@code short *}. The data is of the most
+	 * frequent size of the accesses, and their types are added to the uses. The decompiler
+	 * then shows {@code (&BYTE_4000e46e)[i]} instead of {@code *(byte *)(i + 0x4000e46e)},
+	 * and {@code &SHORT_09294ba0} instead of {@code (short *)&DAT_09294ba0}.
 	 *
-	 * @return the number of arrays given data
+	 * @return the addresses given data
 	 */
-	private static int createArrayData(Program program, Map<Address, List<Use>> arrays,
+	private static List<Address> createData(Program program, Map<Address, List<Use>> undefined,
 			Map<Address, List<DataType>> uses) {
 		Listing listing = program.getListing();
 		Memory memory = program.getMemory();
-		int created = 0;
-		for (Map.Entry<Address, List<Use>> e : arrays.entrySet()) {
+		FunctionManager functions = program.getFunctionManager();
+		List<Address> created = new ArrayList<>();
+		for (Map.Entry<Address, List<Use>> e : undefined.entrySet()) {
 			Address base = e.getKey();
 			MemoryBlock block = memory.getBlock(base);
-			// RAM: writable, not a peripheral, not flash loaded as a writable block
-			if (block == null || !block.isWrite() || block.isVolatile() ||
-				(block.isInitialized() && block.isExecute())) {
+			// RAM or flash, not a peripheral, and not in the code of a function
+			if (block == null || block.isVolatile() ||
+				functions.getFunctionContaining(base) != null) {
 				continue;
 			}
 			Map<Integer, Integer> counts = new HashMap<>();
@@ -402,7 +585,7 @@ public class E200DataTypeAnalyzer extends AbstractAnalyzer {
 			catch (AddressOverflowException | CodeUnitInsertionException ex) {
 				continue;
 			}
-			created++;
+			created.add(base);
 			for (Use use : e.getValue()) {
 				if (use.size() == size && use.type() != null &&
 					!Undefined.isUndefined(use.type()) && use.type().getLength() == size) {
@@ -413,11 +596,7 @@ public class E200DataTypeAnalyzer extends AbstractAnalyzer {
 		return created;
 	}
 
-	private static List<Use> globalUses(DecompileResults results) {
-		HighFunction high = results.getHighFunction();
-		if (high == null) {
-			return null;
-		}
+	private static List<Use> globalUses(HighFunction high) {
 		List<Use> uses = new ArrayList<>();
 		Iterator<HighSymbol> it = high.getGlobalSymbolMap().getSymbols();
 		while (it.hasNext()) {
@@ -431,33 +610,77 @@ public class E200DataTypeAnalyzer extends AbstractAnalyzer {
 			if (type != null && !Undefined.isUndefined(type) &&
 				type.getLength() == symbol.getSize()) {
 				uses.add(new Use(symbol.getStorage().getMinAddress(), type, type.getLength(),
-					false));
+					Access.VALUE));
 			}
 		}
 		AddressSpace space =
 			high.getFunction().getProgram().getAddressFactory().getDefaultAddressSpace();
+		long max = space.getMaxAddress().getOffset();
 		Iterator<PcodeOpAST> ops = high.getPcodeOps();
 		while (ops.hasNext()) {
 			PcodeOpAST op = ops.next();
 			int opcode = op.getOpcode();
+			if (opcode == PcodeOp.PTRSUB && op.getInput(0).isConstant() &&
+				op.getInput(0).getOffset() == 0 && op.getInput(1).isConstant()) {
+				// the address of a global, used as a pointer: to itself or to the cast type
+				long target = op.getInput(1).getOffset();
+				if (target > 0 && target <= max) {
+					for (DataType type : pointedTo(op.getOutput())) {
+						uses.add(new Use(space.getAddress(target), type, type.getLength(),
+							Access.ADDRESS));
+					}
+				}
+				continue;
+			}
 			if (opcode != PcodeOp.LOAD && opcode != PcodeOp.STORE) {
 				continue;
 			}
 			Varnode value = opcode == PcodeOp.LOAD ? op.getOutput() : op.getInput(2);
 			long base = constantBase(op.getInput(1), 0);
-			if (value == null || base <= 0 || base > space.getMaxAddress().getOffset()) {
+			if (value == null || base <= 0 || base > max) {
 				continue;
 			}
 			HighVariable variable = value.getHigh();
 			uses.add(new Use(space.getAddress(base),
-				variable == null ? null : variable.getDataType(), value.getSize(), true));
+				variable == null ? null : variable.getDataType(), value.getSize(),
+				Access.INDEXED));
 		}
 		return uses;
 	}
 
 	/**
+	 * The types a pointer points to, as its own type and the types it is cast to, where they
+	 * are numbers or pointers of 1, 2, 4 or 8 bytes
+	 */
+	private static List<DataType> pointedTo(Varnode pointer) {
+		List<DataType> types = new ArrayList<>();
+		List<Varnode> views = new ArrayList<>();
+		views.add(pointer);
+		Iterator<PcodeOp> uses = pointer.getDescendants();
+		while (uses.hasNext()) {
+			PcodeOp use = uses.next();
+			if (use.getOpcode() == PcodeOp.CAST && use.getOutput() != null) {
+				views.add(use.getOutput());
+			}
+		}
+		for (Varnode v : views) {
+			HighVariable high = v.getHigh();
+			if (high != null && high.getDataType() instanceof Pointer p &&
+				E200TypeFlow.informative(p)) {
+				DataType target = p.getDataType();
+				int length = target.getLength();
+				if (kind(target) != Kind.OTHER &&
+					(length == 1 || length == 2 || length == 4 || length == 8)) {
+					types.add(target);
+				}
+			}
+		}
+		return types;
+	}
+
+	/**
 	 * The constant in an address computed as a constant plus an index, as in
-	 * {@code i * 2 + 0x4000b020}, or -1.
+	 * {@code i * 2 + 0x4000b020} or {@code (&DAT_4000b020)[i]}, or -1.
 	 */
 	private static long constantBase(Varnode address, int depth) {
 		PcodeOp def = address == null || depth > 3 ? null : address.getDef();
@@ -474,6 +697,10 @@ public class E200DataTypeAnalyzer extends AbstractAnalyzer {
 				long base = constantBase(a, depth + 1);
 				return base >= 0 ? base : constantBase(b, depth + 1);
 			}
+			case PcodeOp.PTRSUB: // the address of a global, &DAT_...
+				return def.getInput(0).isConstant() && def.getInput(0).getOffset() == 0 &&
+					def.getInput(1).isConstant() ? def.getInput(1).getOffset() : -1;
+			case PcodeOp.PTRADD: // an element of it, (&DAT_...)[i]
 			case PcodeOp.CAST:
 			case PcodeOp.COPY:
 				return constantBase(def.getInput(0), depth + 1);
@@ -506,9 +733,11 @@ public class E200DataTypeAnalyzer extends AbstractAnalyzer {
 	 *
 	 * @param types the types of the uses
 	 * @param signedChar whether plain {@code char} is signed in the program
+	 * @param floatWins whether a {@code float} wins over integers of its size, as for the uses
+	 * of one global, where values that are only copied look like integers
 	 * @return the type or null
 	 */
-	static DataType chooseType(List<DataType> types, boolean signedChar) {
+	static DataType chooseType(List<DataType> types, boolean signedChar, boolean floatWins) {
 		Map<String, DataType> distinct = new LinkedHashMap<>();
 		Map<String, Integer> counts = new HashMap<>();
 		for (DataType type : types) {
@@ -541,7 +770,7 @@ public class E200DataTypeAnalyzer extends AbstractAnalyzer {
 					}
 				}
 			}
-			if (floats.size() == 1) {
+			if (floats.size() == 1 && floatWins) {
 				chosen = floats.get(0);
 			}
 			else if (floats.isEmpty()) {
@@ -563,16 +792,27 @@ public class E200DataTypeAnalyzer extends AbstractAnalyzer {
 				}
 			}
 		}
-		if (chosen instanceof CharDataType && chosen.getLength() == 1) {
-			// single bytes in firmware are numbers, not characters
-			boolean signed = chosen instanceof SignedCharDataType ||
-				(!(chosen instanceof UnsignedCharDataType) && signedChar);
-			chosen = signed ? SignedByteDataType.dataType : ByteDataType.dataType;
+		// single bytes in firmware are numbers, not characters
+		if (chosen instanceof Pointer pointer && pointer.getDataType() != null &&
+			isChar(pointer.getDataType())) {
+			return new PointerDataType(byteType(pointer.getDataType(), signedChar),
+				pointer.getLength());
 		}
-		return chosen;
+		return isChar(chosen) ? byteType(chosen, signedChar) : chosen;
 	}
 
-	private static boolean applyType(Program program, Address addr, DataType type) {
+	private static boolean isChar(DataType type) {
+		return type instanceof CharDataType && type.getLength() == 1;
+	}
+
+	/** {@code byte} or {@code sbyte} for a character type */
+	private static DataType byteType(DataType c, boolean signedChar) {
+		boolean signed = c instanceof SignedCharDataType ||
+			(!(c instanceof UnsignedCharDataType) && signedChar);
+		return signed ? SignedByteDataType.dataType : ByteDataType.dataType;
+	}
+
+	static boolean applyType(Program program, Address addr, DataType type) {
 		Listing listing = program.getListing();
 		Data data = listing.getDefinedDataAt(addr);
 		if (data == null || !Undefined.isUndefined(data.getDataType()) ||
