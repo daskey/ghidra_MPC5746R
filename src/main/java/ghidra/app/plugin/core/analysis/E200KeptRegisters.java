@@ -103,6 +103,9 @@ final class E200KeptRegisters {
 			Set<Function> callers = new HashSet<>();
 			for (Function function : program.getFunctionManager().getFunctions(true)) {
 				monitor.checkCancelled();
+				if (function.isThunk()) {
+					continue; // its convention is that of the function it branches to
+				}
 				Integer kept = needed.get(function);
 				String wanted = kept == null ? null : conventionName(kept);
 				try {
@@ -422,10 +425,13 @@ final class E200KeptRegisters {
 			relying.clear();
 			Map<Function, Integer> result = new HashMap<>();
 			for (Call call : calls) {
-				int kept = kept(call.callee);
+				// a thunk has the calling convention of the function it branches to
+				Function callee = call.callee.isThunk() ? call.callee.getThunkedFunction(true)
+						: call.callee;
+				int kept = kept(callee);
 				if ((kept & call.readsAfter) != 0) {
-					result.put(call.callee, kept);
-					relying.computeIfAbsent(call.callee, k -> new HashSet<>()).add(call.caller);
+					result.put(callee, kept);
+					relying.computeIfAbsent(callee, k -> new HashSet<>()).add(call.caller);
 				}
 			}
 			return result;

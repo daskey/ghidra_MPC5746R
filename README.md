@@ -157,7 +157,7 @@ warnings appear. Analysis of the application takes 63 s instead of 50 s.
 ### PowerPC e200 Functions
 
 `src/main/java/.../E200FunctionAnalyzer.java` completes the functions after Decompiler
-Parameter ID, in two steps that its options turn on and off:
+Parameter ID, in three steps that its options turn on and off:
 
 - **Functions in gaps** (`E200CodeGaps.java`). Leaf functions without a stack frame that
   nothing calls directly, such as getters, setters and state machine handlers reached
@@ -186,7 +186,14 @@ Parameter ID, in two steps that its options turn on and off:
   Decompiler Parameter ID, which took the kept registers a caller reads after a call for
   results of the call, runs again for the callers whose view of a call changes, so that
   they get their missing parameters. Functions with a signature or calling convention set
-  otherwise are left alone.
+  otherwise are left alone. A thunk has the calling convention of the function it branches
+  to, so calls through it count as calls of that function.
+- **Interrupt handlers.** A handler saves the registers of the interrupted code and
+  restores them before its `se_rfi` (or `se_rfci`, `se_rfdi`, `se_rfmci`), r3 and r4 too.
+  Decompiler Parameter ID took them for parameters and a result, and a handler decompiled
+  as `undefined8 f(undefined4 param_1, undefined4 param_2)` ending in
+  `return CONCAT44(param_2, param_1)`. Functions whose returns are all interrupt returns
+  get the signature `void f(void)`, unless the user or an import set it.
 
 The analyzer takes about 17 seconds on the test firmware. On 11 flash images of it (several
 releases), analyzed with the default options and every function decompiled, this release
