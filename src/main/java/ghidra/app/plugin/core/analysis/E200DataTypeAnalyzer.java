@@ -58,6 +58,11 @@ import ghidra.util.task.TaskMonitor;
  * does this at the end of analysis: with RAM mapped, Ghidra's address table analysis takes
  * flash values such as the float 2.0 (0x40000000) or pairs of VLE instructions for
  * pointers into RAM.
+ * <p>
+ * Arrays in RAM that code indexes, loading or storing at their address plus an index, have
+ * no reference to their start. They get data of the element size there too, typed from the
+ * elements' uses, so that the decompiler shows {@code (&BYTE_4000e46e)[i]} instead of
+ * {@code *(undefined1 *)(i + 0x4000e46e)}.
  */
 public class E200DataTypeAnalyzer extends AbstractAnalyzer {
 
@@ -93,7 +98,11 @@ public class E200DataTypeAnalyzer extends AbstractAnalyzer {
 
 
 	/** A global variable use seen by the decompiler: its address and the inferred type. */
-	private record Use(Address address, DataType type) {}
+	/**
+	 * A global variable use seen by the decompiler: its address and the inferred type, or an
+	 * access to an array through its address plus an index, with the access size.
+	 */
+	private record Use(Address address, DataType type, int size, boolean array) {}
 
 	public E200DataTypeAnalyzer() {
 		super(NAME, DESCRIPTION, AnalyzerType.FUNCTION_ANALYZER);
@@ -325,17 +334,83 @@ public class E200DataTypeAnalyzer extends AbstractAnalyzer {
 		}
 
 		Listing listing = program.getListing();
+		Map<Address, List<Use>> arrays = new TreeMap<>();
 		for (List<Use> list : results) {
 			if (list == null) {
 				continue;
 			}
 			for (Use use : list) {
+				if (use.array()) {
+					arrays.computeIfAbsent(use.address(), a -> new ArrayList<>()).add(use);
+					continue;
+				}
 				Data data = listing.getDefinedDataAt(use.address());
 				if (data != null && Undefined.isUndefined(data.getDataType())) {
 					uses.computeIfAbsent(use.address(), a -> new ArrayList<>()).add(use.type());
 				}
 			}
 		}
+		int created = createArrayData(program, arrays, uses);
+		if (created > 0) {
+			Msg.info(this, "Created data at " + created + " RAM arrays that code indexes");
+		}
+	}
+
+	/**
+	 * Creates data of the element size at the start of RAM arrays that code accesses at their
+	 * address plus an index, where there is none, and adds the element types to the uses.
+	 * The decompiler then shows {@code (&BYTE_4000e46e)[i]} instead of
+	 * {@code *(byte *)(i + 0x4000e46e)}. The element size is the most frequent access size.
+	 *
+	 * @return the number of arrays given data
+	 */
+	private static int createArrayData(Program program, Map<Address, List<Use>> arrays,
+			Map<Address, List<DataType>> uses) {
+		Listing listing = program.getListing();
+		Memory memory = program.getMemory();
+		int created = 0;
+		for (Map.Entry<Address, List<Use>> e : arrays.entrySet()) {
+			Address base = e.getKey();
+			MemoryBlock block = memory.getBlock(base);
+			// RAM: writable, not a peripheral, not flash loaded as a writable block
+			if (block == null || !block.isWrite() || block.isVolatile() ||
+				(block.isInitialized() && block.isExecute())) {
+				continue;
+			}
+			Map<Integer, Integer> counts = new HashMap<>();
+			for (Use use : e.getValue()) {
+				counts.merge(use.size(), 1, Integer::sum);
+			}
+			int size = 0, count = 0;
+			for (Map.Entry<Integer, Integer> c : counts.entrySet()) {
+				if (c.getValue() > count || (c.getValue() == count && c.getKey() > size)) {
+					size = c.getKey();
+					count = c.getValue();
+				}
+			}
+			if (size != 1 && size != 2 && size != 4 && size != 8 ||
+				base.getOffset() % size != 0) {
+				continue;
+			}
+			try {
+				Address end = base.addNoWrap(size - 1);
+				if (!block.contains(end) || !listing.isUndefined(base, end)) {
+					continue;
+				}
+				listing.createData(base, Undefined.getUndefinedDataType(size));
+			}
+			catch (AddressOverflowException | CodeUnitInsertionException ex) {
+				continue;
+			}
+			created++;
+			for (Use use : e.getValue()) {
+				if (use.size() == size && use.type() != null &&
+					!Undefined.isUndefined(use.type()) && use.type().getLength() == size) {
+					uses.computeIfAbsent(base, a -> new ArrayList<>()).add(use.type());
+				}
+			}
+		}
+		return created;
 	}
 
 	private static List<Use> globalUses(DecompileResults results) {
@@ -355,10 +430,56 @@ public class E200DataTypeAnalyzer extends AbstractAnalyzer {
 			DataType type = variable.getDataType();
 			if (type != null && !Undefined.isUndefined(type) &&
 				type.getLength() == symbol.getSize()) {
-				uses.add(new Use(symbol.getStorage().getMinAddress(), type));
+				uses.add(new Use(symbol.getStorage().getMinAddress(), type, type.getLength(),
+					false));
 			}
 		}
+		AddressSpace space =
+			high.getFunction().getProgram().getAddressFactory().getDefaultAddressSpace();
+		Iterator<PcodeOpAST> ops = high.getPcodeOps();
+		while (ops.hasNext()) {
+			PcodeOpAST op = ops.next();
+			int opcode = op.getOpcode();
+			if (opcode != PcodeOp.LOAD && opcode != PcodeOp.STORE) {
+				continue;
+			}
+			Varnode value = opcode == PcodeOp.LOAD ? op.getOutput() : op.getInput(2);
+			long base = constantBase(op.getInput(1), 0);
+			if (value == null || base <= 0 || base > space.getMaxAddress().getOffset()) {
+				continue;
+			}
+			HighVariable variable = value.getHigh();
+			uses.add(new Use(space.getAddress(base),
+				variable == null ? null : variable.getDataType(), value.getSize(), true));
+		}
 		return uses;
+	}
+
+	/**
+	 * The constant in an address computed as a constant plus an index, as in
+	 * {@code i * 2 + 0x4000b020}, or -1.
+	 */
+	private static long constantBase(Varnode address, int depth) {
+		PcodeOp def = address == null || depth > 3 ? null : address.getDef();
+		if (def == null) {
+			return -1;
+		}
+		switch (def.getOpcode()) {
+			case PcodeOp.INT_ADD: {
+				Varnode a = def.getInput(0);
+				Varnode b = def.getInput(1);
+				if (a.isConstant() != b.isConstant()) {
+					return (a.isConstant() ? a : b).getOffset();
+				}
+				long base = constantBase(a, depth + 1);
+				return base >= 0 ? base : constantBase(b, depth + 1);
+			}
+			case PcodeOp.CAST:
+			case PcodeOp.COPY:
+				return constantBase(def.getInput(0), depth + 1);
+			default:
+				return -1;
+		}
 	}
 
 	private enum Kind {
