@@ -135,6 +135,7 @@ se_andc
 se_andi
 se_b
 se_bclri
+se_bctr
 se_bctrl
 se_beq
 se_bge

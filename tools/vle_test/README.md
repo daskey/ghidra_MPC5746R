@@ -40,11 +40,12 @@ The image must start at 0x10000000 and be 256 KB, the layout `vle_tests.py` assu
 
 ## Results
 
-With the arguments above: 7,555 encodings of 198 mnemonics, 90,660 runs. 88,660 results
-agree with the model and none differ; 2,000 are skipped (below).
+With the arguments above: 7,556 encodings of 199 mnemonics, 90,672 runs. 88,647 results
+agree with the model and none differ; 2,025 are skipped (below).
 
 With Ghidra's own semantics for the instructions that `e200_isa.sinc` corrects, 5,259 of
-88,150 results differ (`e_addwss` does not decode there), all in these instructions of
+88,150 results of the 198 instructions tested then differ (`e_addwss` does not decode
+there), all in these instructions of
 Ghidra's `ppc_vle.sinc`:
 
 | Instructions | Results that differ | Ghidra's semantics | Correct |
@@ -69,3 +70,4 @@ module's p-code deliberately differs (see the modelling notes in the module READ
 - `efsctui` of a value exactly halfway between two integers: the p-code rounds it up,
   the hardware to even
 - `efsmax`/`efsmin` of equal values, which differ only in the sign of zero
+- `se_bctr`/`se_bctrl` with an odd CTR, which the p-code does not round down
