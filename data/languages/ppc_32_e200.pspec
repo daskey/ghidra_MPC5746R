@@ -4,7 +4,9 @@
 <processor_spec>
   <properties>
     <property key="addressesDoNotAppearDirectlyInCode" value="true"/>
-    <property key="emulateInstructionStateModifierClass" value="ghidra.program.emulation.PPCEmulateInstructionStateModifier"/>
+    <!-- No emulateInstructionStateModifierClass: Ghidra's PPCEmulateInstructionStateModifier
+         only adds AltiVec vperm, which the e200 lacks, and is in the stock PowerPC module,
+         without which the emulator refused to start for this language. -->
     <property key="useropLibs" value="ppc"/>
     <!-- Replaced by the PowerPC e200 Constant Reference Analyzer of this extension -->
     <property key="Analyzers.PowerPC Constant Reference Analyzer" value="false"/>
@@ -22,6 +24,24 @@
       <set name="linkreg" val="0"/>
     </context_set>
   </context_data>
+
+  <!-- SPRs the hardware changes between accesses (see VOLATILE_SPRS). Given as register
+       space ranges: the volatile attribute of a renamed register breaks the decompiler. -->
+  <volatile outputop="write_volatile" inputop="read_volatile">
+    <range space="register" first="0x1058" last="0x105b"/>  <!-- DEC -->
+    <range space="register" first="0x14c0" last="0x14c3"/>  <!-- DBSR -->
+    <range space="register" first="0x1540" last="0x1543"/>  <!-- TSR -->
+    <range space="register" first="0x18f0" last="0x18f3"/>  <!-- MCSR -->
+    <range space="register" first="0x19c0" last="0x19c3"/>  <!-- MAS0 -->
+    <range space="register" first="0x19c4" last="0x19c7"/>  <!-- MAS1 -->
+    <range space="register" first="0x19c8" last="0x19cb"/>  <!-- MAS2 -->
+    <range space="register" first="0x19cc" last="0x19cf"/>  <!-- MAS3 -->
+    <range space="register" first="0x1fc8" last="0x1fcb"/>  <!-- L1CSR0 -->
+    <range space="register" first="0x1fcc" last="0x1fcf"/>  <!-- L1CSR1 -->
+    <range space="register" first="0x1fd0" last="0x1fd3"/>  <!-- MMUCSR0 -->
+    <range space="register" first="0x1fd4" last="0x1fd7"/>  <!-- BUCSR -->
+    <range space="register" first="0x1fd8" last="0x1fdb"/>  <!-- MPU0CSR0 -->
+  </volatile>
 
   <!-- e200z4 special purpose registers. Unnamed SPRs keep their sprNNN names. -->
   <register_data>

@@ -97,8 +97,9 @@ public class E200DataTypeAnalyzer extends AbstractAnalyzer {
 
 	public E200DataTypeAnalyzer() {
 		super(NAME, DESCRIPTION, AnalyzerType.FUNCTION_ANALYZER);
-		// after Decompiler Parameter ID, whose prototypes give the decompiler more to go on
-		setPriority(AnalysisPriority.DATA_TYPE_PROPOGATION.after().after().after());
+		// after Decompiler Parameter ID, whose prototypes give the decompiler more to go on,
+		// and the calling conventions of the PowerPC e200 Functions analyzer
+		setPriority(AnalysisPriority.DATA_TYPE_PROPOGATION.after().after().after().after());
 		setDefaultEnablement(true);
 		setSupportsOneTimeAnalysis();
 	}

@@ -155,7 +155,90 @@ macro vleCompareUnsigned(a, b) {
 :e_cmphl16i A,IMM16	is $(ISVLE) & OP=28 & XOP_11_VLE=23 & BIT_0=0 & A & IMM16 { vleCompareUnsigned(A:2, IMM16); }
 :e_cmphl16i A,IMM16	is $(ISVLE) & OP=28 & XOP_11_VLE=23 & BIT_0=1 & A & IMM16 { vleCompareUnsigned(A:2, IMM16); }
 
-# ---- Unsigned saturated math (e200z425 rev 2, MPC5746R) ---------------------------
+# The following were found by the differential tests in tools/vle_test and are split the
+# same way, on a bit of an operand field.
+
+# Conditional branch and link. Ghidra set LR only when the branch was taken and called
+# through the word at the target ("call [addrBD15]"), so the emulator went to whatever
+# address the code there happened to encode. LR is set either way.
+:e_b^CC32^"l" BI_CR_VLE, addrBD15	is $(ISVLE) & OP=30 & XOP_VLE=8 & LK=1 & addrBD15 & BIT_L=0 & BI_CR_VLE & CC32 & BIT_1=0 {
+	LR = inst_next;
+	if (CC32 == 0) goto inst_next;
+	call addrBD15;
+}
+:e_b^CC32^"l" BI_CR_VLE, addrBD15	is $(ISVLE) & OP=30 & XOP_VLE=8 & LK=1 & addrBD15 & BIT_L=0 & BI_CR_VLE & CC32 & BIT_1=1 {
+	LR = inst_next;
+	if (CC32 == 0) goto inst_next;
+	call addrBD15;
+}
+:e_b^CC32^"l" addrBD15	is $(ISVLE) & OP=30 & XOP_VLE=8 & LK=1 & addrBD15 & BIT_L=1 & CC32 & BIT_1=0 {
+	LR = inst_next;
+	if (CC32 == 0) goto inst_next;
+	call addrBD15;
+}
+:e_b^CC32^"l" addrBD15	is $(ISVLE) & OP=30 & XOP_VLE=8 & LK=1 & addrBD15 & BIT_L=1 & CC32 & BIT_1=1 {
+	LR = inst_next;
+	if (CC32 == 0) goto inst_next;
+	call addrBD15;
+}
+
+# Rotate masks. MASK(MB, ME) with MB > ME wraps around: bits MB to 31 and 0 to ME. Ghidra's
+# mask left out bits MB and ME, so for example "e_rlwinm r3,r4,0,31,0" gave 0 instead of
+# r4 & 0x80000001. ((ME - MB) >> 8) & 1 is 1 when MB > ME.
+RLWMask: mask is MBL & ME	[ mask = ((0xFFFFFFFF >> MBL) & ((0xFFFFFFFF << (31 - ME)) & 0xFFFFFFFF)) |
+						  (((0xFFFFFFFF >> MBL) | ((0xFFFFFFFF << (31 - ME)) & 0xFFFFFFFF)) *
+						   (((ME - MBL) >> 8) & 1)); ] {
+	export *[const]:4 mask;
+}
+macro rotateLeftWord(result, value, n) {
+	local v:4 = value;
+	result = (v << n) | (v >> (32 - n));
+}
+:e_rlwimi A,S,SHL,MBL,ME	is $(ISVLE) & OP=29 & BIT_0=0 & MBL & ME & A & SHL & S & RLWMask & BIT_1=0 {
+	local r:4 = 0; rotateLeftWord(r, S, SHL);
+	A = zext(r & RLWMask) | (A & zext(~RLWMask));
+}
+:e_rlwimi A,S,SHL,MBL,ME	is $(ISVLE) & OP=29 & BIT_0=0 & MBL & ME & A & SHL & S & RLWMask & BIT_1=1 {
+	local r:4 = 0; rotateLeftWord(r, S, SHL);
+	A = zext(r & RLWMask) | (A & zext(~RLWMask));
+}
+:e_rlwinm A,S,SHL,MBL,ME	is $(ISVLE) & OP=29 & BIT_0=1 & MBL & ME & A & SHL & S & RLWMask & BIT_1=0 {
+	local r:4 = 0; rotateLeftWord(r, S, SHL);
+	A = zext(r & RLWMask);
+}
+:e_rlwinm A,S,SHL,MBL,ME	is $(ISVLE) & OP=29 & BIT_0=1 & MBL & ME & A & SHL & S & RLWMask & BIT_1=1 {
+	local r:4 = 0; rotateLeftWord(r, S, SHL);
+	A = zext(r & RLWMask);
+}
+
+# 16-bit shifts by a register. The shift amount is the low 6 bits of rY, so 32 to 63 shift
+# all bits out; Ghidra used 5 bits. se_sraw and se_srawi set CA when a negative value
+# shifts out 1 bits, as sraw and srawi do; Ghidra set it for any nonzero shift.
+macro vleShiftRightAlgebraic(rx, n) {
+	local v:4 = rx;
+	shiftCarry(v, n);
+	rx = sext(v s>> n);
+}
+:se_srw RX_VLE,RY_VLE	is $(ISVLE) & OP6_VLE=16 & BITS_8_9=0 & RX_VLE & RY_VLE & LK0_VLE=0 {
+	local n:1 = RY_VLE[0,6]; RX_VLE = zext(RX_VLE >> n);
+}
+:se_srw RX_VLE,RY_VLE	is $(ISVLE) & OP6_VLE=16 & BITS_8_9=0 & RX_VLE & RY_VLE & LK0_VLE=1 {
+	local n:1 = RY_VLE[0,6]; RX_VLE = zext(RX_VLE >> n);
+}
+:se_sraw RX_VLE,RY_VLE	is $(ISVLE) & OP6_VLE=16 & BITS_8_9=1 & RX_VLE & RY_VLE & LK0_VLE=0 {
+	local n:1 = RY_VLE[0,6]; vleShiftRightAlgebraic(RX_VLE, n);
+}
+:se_sraw RX_VLE,RY_VLE	is $(ISVLE) & OP6_VLE=16 & BITS_8_9=1 & RX_VLE & RY_VLE & LK0_VLE=1 {
+	local n:1 = RY_VLE[0,6]; vleShiftRightAlgebraic(RX_VLE, n);
+}
+:se_srawi RX_VLE,OIM5_VLE	is $(ISVLE) & OP6_VLE=26 & BIT9_VLE=1 & RX_VLE & OIM5_VLE & LK0_VLE=0 {
+	local n:1 = OIM5_VLE; vleShiftRightAlgebraic(RX_VLE, n);
+}
+:se_srawi RX_VLE,OIM5_VLE	is $(ISVLE) & OP6_VLE=26 & BIT9_VLE=1 & RX_VLE & OIM5_VLE & LK0_VLE=1 {
+	local n:1 = OIM5_VLE; vleShiftRightAlgebraic(RX_VLE, n);
+}
+
+# ---- Saturated math (e200z425 rev 2, MPC5746R) ----------------------------------
 # Not in any public manual or in GNU binutils. Encodings and semantics were derived from
 # production MPC5746R firmware and checked against IDA Pro; see Ghidra PR #8829.
 # Subtraction follows the subf convention: rD = rB - rA, saturating at 0.
@@ -167,6 +250,27 @@ macro vleCompareUnsigned(a, b) {
 	tmpResult:4 = tmpA + tmpB;
 	if (!carry(tmpA, tmpB)) goto <no_overflow>;
 		D = 0xFFFFFFFF;
+		goto <done>;
+	<no_overflow>
+		D = zext(tmpResult);
+	<done>
+}
+
+# e_addwss - Add Word Signed Saturate
+# The e_addwus encoding with bit 21 clear, which all the unsigned forms set. Production
+# MPC5746R firmware uses it to increment a counter that it compares signed (cmpw), next
+# to an e_addhus increment of a counter it compares unsigned (cmplw). Without it,
+# disassembly stopped there ("Unable to resolve constructor").
+:e_addwss D,A,B		is $(ISVLE) & OP=31 & D & A & B & XOP_1_10=0x16A & BIT_0=0 {
+	tmpA:4 = A:4;
+	tmpB:4 = B:4;
+	tmpResult:4 = tmpA + tmpB;
+	if (!scarry(tmpA, tmpB)) goto <no_overflow>;
+	if (tmpA s< 0) goto <negative>;
+		D = 0x7FFFFFFF;
+		goto <done>;
+	<negative>
+		D = 0x80000000;
 		goto <done>;
 	<no_overflow>
 		D = zext(tmpResult);
