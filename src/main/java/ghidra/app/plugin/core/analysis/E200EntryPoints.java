@@ -17,9 +17,8 @@ package ghidra.app.plugin.core.analysis;
 
 import java.util.*;
 
-import ghidra.app.services.*;
 import ghidra.app.util.PseudoDisassembler;
-import ghidra.app.util.importer.MessageLog;
+import ghidra.framework.options.Options;
 import ghidra.program.model.address.*;
 import ghidra.program.model.data.*;
 import ghidra.program.model.listing.Program;
@@ -32,10 +31,10 @@ import ghidra.util.exception.InvalidInputException;
 import ghidra.util.task.TaskMonitor;
 
 /**
- * Finds the entry points of MPC57xx flash images for the NXP e200z4 VLE language
- * ({@code PowerPC:BE:32:VLE-e200}): the reset vectors in boot headers and the interrupt
- * vectors. A raw flash image has no other entry points, and startup code usually reaches the
- * interrupt setup only through values that analysis cannot follow.
+ * Finds the entry points of MPC57xx flash images (part of {@link E200Analyzer}): the reset
+ * vectors in boot headers and the interrupt vectors, in memory not searched before. A raw
+ * flash image has no other entry points, and startup code usually reaches the interrupt setup
+ * only through values that analysis cannot follow.
  * <ul>
  * <li>Boot headers: the boot assist flash looks for a boot header at the start of flash
  * blocks. Its first word holds the boot identifier 0x5A in bits 8-15 ({@code 0x005A....}),
@@ -47,13 +46,14 @@ import ghidra.util.task.TaskMonitor;
  * labeled ({@code IVOR4_ExternalInput}, ...) and the handlers become functions.</li>
  * </ul>
  */
-public class E200EntryPointAnalyzer extends AbstractAnalyzer {
+final class E200EntryPoints {
 
-	private static final String NAME = "PowerPC e200 Entry Points";
-	private static final String DESCRIPTION =
-		"Finds the entry points of MPC57xx flash images: the reset vectors in boot headers\n" +
-			"(a word 0x005A.... at the start of a block or a 16 KB boundary) and interrupt vector\n" +
-			"tables (e_b instructions 16 bytes apart), and disassembles them as functions.";
+	private static final String OPTION_NAME = "Find boot headers and interrupt vectors";
+	private static final String OPTION_DESCRIPTION =
+		"Find the entry points of MPC57xx flash images: the reset vectors in boot\n" +
+			"headers (a word 0x005A.... at the start of a block or a 16 KB boundary) and\n" +
+			"interrupt vector tables (e_b instructions 16 bytes apart), and disassemble\n" +
+			"them as functions.";
 
 	private static final int BOOT_ID = 0x005A;
 
@@ -83,31 +83,36 @@ public class E200EntryPointAnalyzer extends AbstractAnalyzer {
 		"IVOR15_Debug", "IVOR32_EfpuUnavailable", "IVOR33_EfpuDataException",
 		"IVOR34_EfpuRoundException" };
 
-	public E200EntryPointAnalyzer() {
-		super(NAME, DESCRIPTION, AnalyzerType.BYTE_ANALYZER);
-		setPriority(AnalysisPriority.FORMAT_ANALYSIS);
-		setDefaultEnablement(true);
-		setSupportsOneTimeAnalysis();
+	private boolean enabled = true;
+
+	/** The initialized memory searched so far */
+	private AddressSetView searched = new AddressSet();
+
+	void registerOptions(Options options) {
+		options.registerOption(OPTION_NAME, enabled, null, OPTION_DESCRIPTION);
 	}
 
-	@Override
-	public boolean canAnalyze(Program program) {
-		return E200AddressAnalyzer.LANGUAGE_ID.equals(program.getLanguageID().getIdAsString());
+	void optionsChanged(Options options) {
+		enabled = options.getBoolean(OPTION_NAME, enabled);
 	}
 
-	@Override
-	public boolean added(Program program, AddressSetView set, TaskMonitor monitor,
-			MessageLog log) throws CancelledException {
+	/** Finds the entry points in the initialized memory not searched yet. */
+	void find(Program program, TaskMonitor monitor) throws CancelledException {
+		AddressSetView memory = program.getMemory().getLoadedAndInitializedAddressSet();
+		if (!enabled || memory.equals(searched)) {
+			return;
+		}
+		AddressSet set = memory.subtract(searched);
+		searched = memory;
 		for (MemoryBlock block : program.getMemory().getBlocks()) {
 			monitor.checkCancelled();
 			if (block.isInitialized() && set.intersects(block.getStart(), block.getEnd())) {
 				findBootHeaders(program, block, set);
 			}
 		}
-		for (AddressRange range : E200AddressAnalyzer.executableMemory(program).intersect(set)) {
+		for (AddressRange range : E200Analyzer.executableMemory(program).intersect(set)) {
 			findVectorTables(program, range, monitor);
 		}
-		return true;
 	}
 
 	// ---- Boot headers -----------------------------------------------------------------------

@@ -24,7 +24,6 @@ import java.util.zip.GZIPInputStream;
 
 import generic.jar.ResourceFile;
 import ghidra.app.plugin.core.analysis.SvdDevice.*;
-import ghidra.app.services.*;
 import ghidra.app.util.importer.MessageLog;
 import ghidra.framework.Application;
 import ghidra.framework.options.Options;
@@ -41,8 +40,8 @@ import ghidra.util.exception.InvalidInputException;
 import ghidra.util.task.TaskMonitor;
 
 /**
- * Adds the MPC5746R peripherals for the NXP e200z4 VLE language ({@code PowerPC:BE:32:VLE-e200})
- * from NXP's CMSIS-SVD description, which the extension bundles: a volatile memory block for
+ * Adds the MPC5746R peripherals (part of {@link E200Analyzer}) from NXP's CMSIS-SVD
+ * description, which the extension bundles: a volatile memory block for
  * each peripheral where nothing is mapped, and a structure of its registers at its base
  * address, labeled with the peripheral's name. The decompiler then shows peripheral accesses
  * such as {@code INTC.PSR[0x1b] = 0} instead of {@code _DAT_fc040076 = 0}.
@@ -60,18 +59,17 @@ import ghidra.util.task.TaskMonitor;
  * decompiler then names the field a test extracts ({@code FCCU.CTRL.OPS != 3}), but casts
  * every write of a whole register.</li>
  * </ul>
- * Like the RAM blocks of {@link E200DataTypeAnalyzer}, the peripherals are added at the end
+ * Like the RAM blocks of {@link E200DataTypes}, the peripherals are added at the end
  * of analysis: with them mapped, Ghidra's address table analysis takes flash values for
  * pointers into peripheral space.
  */
-public class E200PeripheralAnalyzer extends AbstractAnalyzer {
+final class E200Peripherals {
 
-	private static final String NAME = "PowerPC e200 Peripherals";
-	private static final String DESCRIPTION =
-		"Adds the MPC5746R peripherals from NXP's SVD description, bundled with the extension:\n" +
+	private static final String OPTION_NAME = "Add MPC5746R peripherals";
+	private static final String OPTION_DESCRIPTION =
+		"Add the MPC5746R peripherals from NXP's SVD description, bundled with the extension:\n" +
 			"a volatile memory block and a structure of registers at each peripheral's base\n" +
 			"address, where nothing is mapped.";
-
 	private static final String OPTION_NAME_BIT_FIELDS = "Register bit fields";
 	private static final String OPTION_DESCRIPTION_BIT_FIELDS =
 		"Type registers as structures of their bit fields rather than as integers. The\n" +
@@ -84,41 +82,31 @@ public class E200PeripheralAnalyzer extends AbstractAnalyzer {
 	/** The bundled device description, read once. */
 	private static SvdDevice device;
 
+	private boolean enabled = true;
 	private boolean bitFields = OPTION_DEFAULT_BIT_FIELDS;
 
 	/** The initialized memory for which the peripherals were last added. */
 	private AddressSetView appliedFor;
 
-	public E200PeripheralAnalyzer() {
-		super(NAME, DESCRIPTION, AnalyzerType.FUNCTION_ANALYZER);
-		// just before the global data types, like its RAM blocks: see the class comment
-		setPriority(AnalysisPriority.DATA_TYPE_PROPOGATION.after().after());
-		setDefaultEnablement(true);
-		setSupportsOneTimeAnalysis();
-	}
-
-	@Override
-	public boolean canAnalyze(Program program) {
-		return E200AddressAnalyzer.LANGUAGE_ID.equals(program.getLanguageID().getIdAsString());
-	}
-
-	@Override
-	public void registerOptions(Options options, Program program) {
+	void registerOptions(Options options) {
+		options.registerOption(OPTION_NAME, enabled, null, OPTION_DESCRIPTION);
 		options.registerOption(OPTION_NAME_BIT_FIELDS, bitFields, null,
 			OPTION_DESCRIPTION_BIT_FIELDS);
 	}
 
-	@Override
-	public void optionsChanged(Options options, Program program) {
+	void optionsChanged(Options options) {
+		enabled = options.getBoolean(OPTION_NAME, enabled);
 		bitFields = options.getBoolean(OPTION_NAME_BIT_FIELDS, bitFields);
 	}
 
-	@Override
-	public boolean added(Program program, AddressSetView set, TaskMonitor monitor,
-			MessageLog log) throws CancelledException {
-		// first, and again when memory is added, which may hold tables of base addresses
+	/**
+	 * Adds the peripherals, at the end of analysis (see the class comment), and again when
+	 * memory is added, which may hold tables of base addresses.
+	 */
+	boolean apply(Program program, TaskMonitor monitor, MessageLog log)
+			throws CancelledException {
 		AddressSetView memory = program.getMemory().getLoadedAndInitializedAddressSet();
-		if (memory.equals(appliedFor)) {
+		if (!enabled || memory.equals(appliedFor)) {
 			return true;
 		}
 		appliedFor = memory;
@@ -129,10 +117,10 @@ public class E200PeripheralAnalyzer extends AbstractAnalyzer {
 		catch (IOException e) {
 			String message = "Could not read the peripheral description: " + e.getMessage();
 			Msg.warn(this, message);
-			log.appendMsg(NAME, message);
+			log.appendMsg(E200Analyzer.NAME, message);
 			return false;
 		}
-		monitor.setMessage(NAME + " - " + svd.name);
+		monitor.setMessage(E200Analyzer.NAME + " - " + svd.name);
 		new PeripheralBuilder(program, svd, bitFields).build(monitor);
 		return true;
 	}
@@ -236,7 +224,7 @@ public class E200PeripheralAnalyzer extends AbstractAnalyzer {
 			}
 			int pointers = typeBaseAddressTables(typesAt, monitor);
 			if (typed > 0 || pointers > 0) {
-				Msg.info(E200PeripheralAnalyzer.class, "Added " + typed + " peripherals of " +
+				Msg.info(E200Peripherals.class, "Added " + typed + " peripherals of " +
 					device.name + " (" + blocks + " memory blocks) and typed " + pointers +
 					" pointers to them");
 			}
@@ -334,11 +322,11 @@ public class E200PeripheralAnalyzer extends AbstractAnalyzer {
 					block.setPermissions(true, true, false);
 					block.setVolatile(true);
 					block.setComment((p.description() == null ? p.name() : p.description()) +
-						", added by " + NAME);
+						", added by " + E200Analyzer.NAME);
 					count++;
 				}
 				catch (LockException | MemoryConflictException | AddressOverflowException e) {
-					Msg.info(E200PeripheralAnalyzer.class,
+					Msg.info(E200Peripherals.class,
 						"Could not add " + name + ": " + e.getMessage());
 				}
 			}
@@ -437,8 +425,8 @@ public class E200PeripheralAnalyzer extends AbstractAnalyzer {
 						comment(r), r.alternate()));
 				}
 				else {
-					strided.computeIfAbsent(r.dim() + "|" + r.dimIncrement(), k -> new ArrayList<>())
-							.add(r);
+					strided.computeIfAbsent(r.dim() + "|" + r.dimIncrement(),
+						k -> new ArrayList<>()).add(r);
 				}
 			}
 			for (List<Register> group : strided.values()) {

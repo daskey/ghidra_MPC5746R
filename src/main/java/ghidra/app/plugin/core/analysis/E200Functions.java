@@ -19,10 +19,9 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
 
-import ghidra.app.services.*;
 import ghidra.app.util.importer.MessageLog;
 import ghidra.framework.options.Options;
-import ghidra.program.model.address.AddressSetView;
+import ghidra.program.model.address.AddressSet;
 import ghidra.program.model.data.VoidDataType;
 import ghidra.program.model.lang.Language;
 import ghidra.program.model.listing.*;
@@ -35,7 +34,7 @@ import ghidra.util.exception.*;
 import ghidra.util.task.TaskMonitor;
 
 /**
- * Completes the functions after Decompiler Parameter ID:
+ * Completes the functions after Decompiler Parameter ID (part of {@link E200Analyzer}):
  * <ul>
  * <li>creates the functions in gaps between functions, which nothing calls directly and which
  * have no stack frame (see {@link E200CodeGaps})</li>
@@ -45,15 +44,7 @@ import ghidra.util.task.TaskMonitor;
  * as {@code se_rfi}, the signature {@code void f(void)}</li>
  * </ul>
  */
-public class E200FunctionAnalyzer extends AbstractAnalyzer {
-
-	private static final String NAME = "PowerPC e200 Functions";
-	private static final String DESCRIPTION =
-		"Creates the functions in gaps between functions (leaf functions without a stack frame\n" +
-			"that nothing calls directly, such as getters and table lookup routines), gives\n" +
-			"functions that keep some of the volatile registers r0 and r3-r12, where their\n" +
-			"callers rely on it, a calling convention that lists them, and gives interrupt\n" +
-			"handlers no parameters and no return value.";
+final class E200Functions {
 
 	private static final String OPTION_NAME_GAPS = "Find functions in gaps";
 	private static final String OPTION_DESCRIPTION_GAPS =
@@ -76,50 +67,51 @@ public class E200FunctionAnalyzer extends AbstractAnalyzer {
 	private boolean keptOption = true;
 	private boolean handlersOption = true;
 
-	public E200FunctionAnalyzer() {
-		super(NAME, DESCRIPTION, AnalyzerType.FUNCTION_ANALYZER);
-		// after Decompiler Parameter ID, which commits the parameters that the calling
-		// conventions may then keep (see E200KeptRegisters); the functions found in gaps get
-		// their prototypes when Parameter ID and this analyzer run again for them. Before the
-		// data type analysis, which then decompiles with the conventions.
-		setPriority(AnalysisPriority.DATA_TYPE_PROPOGATION.after().after().after());
-		setDefaultEnablement(true);
-		setSupportsOneTimeAnalysis();
-	}
+	/** Whether the last run found functions in gaps */
+	private boolean found;
 
-	@Override
-	public boolean canAnalyze(Program program) {
-		return E200AddressAnalyzer.LANGUAGE_ID.equals(program.getLanguageID().getIdAsString());
-	}
-
-	@Override
-	public void registerOptions(Options options, Program program) {
+	void registerOptions(Options options) {
 		options.registerOption(OPTION_NAME_GAPS, gapsOption, null, OPTION_DESCRIPTION_GAPS);
 		options.registerOption(OPTION_NAME_KEPT, keptOption, null, OPTION_DESCRIPTION_KEPT);
 		options.registerOption(OPTION_NAME_HANDLERS, handlersOption, null,
 			OPTION_DESCRIPTION_HANDLERS);
 	}
 
-	@Override
-	public void optionsChanged(Options options, Program program) {
+	void optionsChanged(Options options) {
 		gapsOption = options.getBoolean(OPTION_NAME_GAPS, gapsOption);
 		keptOption = options.getBoolean(OPTION_NAME_KEPT, keptOption);
 		handlersOption = options.getBoolean(OPTION_NAME_HANDLERS, handlersOption);
 	}
 
-	@Override
-	public boolean added(Program program, AddressSetView set, TaskMonitor monitor,
+	/**
+	 * Completes the functions, which Decompiler Parameter ID has given prototypes; returns
+	 * false if the program's specification cannot be extended with calling conventions.
+	 */
+	boolean apply(Program program, Set<Function> analyzed, TaskMonitor monitor,
 			MessageLog log) throws CancelledException {
+		found = false;
 		if (gapsOption) {
-			// the functions are created after this pass; the analyzers run again for them
-			E200CodeGaps.findFunctions(program, set, monitor);
+			// the functions are created after this step, and it runs again for them
+			AddressSet entries = new AddressSet();
+			analyzed.forEach(f -> entries.add(f.getEntryPoint()));
+			found = E200CodeGaps.findFunctions(program, entries, monitor) > 0;
 		}
-		boolean ok = !keptOption || E200KeptRegisters.apply(program, monitor, log, NAME);
+		boolean ok = true;
+		Set<Function> identified = new HashSet<>();
+		if (keptOption) {
+			ok = E200KeptRegisters.apply(program, identified, monitor, log, E200Analyzer.NAME);
+		}
 		if (handlersOption) {
-			// after the kept registers, which may run Decompiler Parameter ID again
-			setHandlerSignatures(program, monitor);
+			// and those whose signatures Decompiler Parameter ID set again
+			identified.addAll(analyzed);
+			setHandlerSignatures(program, identified, monitor);
 		}
 		return ok;
+	}
+
+	/** Whether the last run found functions in gaps */
+	boolean foundFunctions() {
+		return found;
 	}
 
 	/**
@@ -129,27 +121,15 @@ public class E200FunctionAnalyzer extends AbstractAnalyzer {
 	 * Decompiler Parameter ID takes their values for parameters and a returned
 	 * {@code undefined8}.
 	 */
-	private static void setHandlerSignatures(Program program, TaskMonitor monitor)
-			throws CancelledException {
+	private static void setHandlerSignatures(Program program, Set<Function> functions,
+			TaskMonitor monitor) throws CancelledException {
 		Language language = program.getLanguage();
-		FunctionManager functions = program.getFunctionManager();
-		Set<Function> handlers = new HashSet<>();
-		Set<Function> others = new HashSet<>(); // functions with other returns
-		for (Instruction instruction : program.getListing().getInstructions(true)) {
-			monitor.checkCancelled();
-			FlowType flow = instruction.getFlowType();
-			if (!flow.isTerminal() || flow.isCall()) {
-				continue;
-			}
-			Function function = functions.getFunctionContaining(instruction.getAddress());
-			if (function != null) {
-				(returnsFromInterrupt(language, instruction) ? handlers : others).add(function);
-			}
-		}
-		handlers.removeAll(others);
+		Listing listing = program.getListing();
 		int changed = 0;
-		for (Function function : handlers) {
-			if (function.getSignatureSource().isHigherPriorityThan(SourceType.ANALYSIS) ||
+		for (Function function : functions) {
+			monitor.checkCancelled();
+			if (!returnsFromInterrupt(language, listing, function) ||
+				function.getSignatureSource().isHigherPriorityThan(SourceType.ANALYSIS) ||
 				function.getParameterCount() == 0 &&
 					VoidDataType.isVoidDataType(function.getReturnType())) {
 				continue;
@@ -161,25 +141,39 @@ public class E200FunctionAnalyzer extends AbstractAnalyzer {
 				changed++;
 			}
 			catch (InvalidInputException | DuplicateNameException e) {
-				Msg.warn(E200FunctionAnalyzer.class,
+				Msg.warn(E200Functions.class,
 					"Could not set the signature of " + function + ": " + e);
 			}
 		}
 		if (changed > 0) {
-			Msg.info(E200FunctionAnalyzer.class,
+			Msg.info(E200Functions.class,
 				"Set the signature of " + changed + " interrupt handlers to void f(void)");
 		}
 	}
 
-	/** An instruction that returns through a returnFrom...Interrupt p-code operation */
-	private static boolean returnsFromInterrupt(Language language, Instruction instruction) {
-		for (PcodeOp op : instruction.getPcode()) {
-			if (op.getOpcode() == PcodeOp.CALLOTHER && language
-					.getUserDefinedOpName((int) op.getInput(0).getOffset())
-					.startsWith("returnFrom")) {
-				return true;
+	/**
+	 * Whether all the returns of a function, and at least one, go through a
+	 * returnFrom...Interrupt p-code operation
+	 */
+	private static boolean returnsFromInterrupt(Language language, Listing listing,
+			Function function) {
+		boolean found = false;
+		for (Instruction instruction : listing.getInstructions(function.getBody(), true)) {
+			FlowType flow = instruction.getFlowType();
+			if (!flow.isTerminal() || flow.isCall()) {
+				continue;
 			}
+			boolean interrupt = false;
+			for (PcodeOp op : instruction.getPcode()) {
+				interrupt |= op.getOpcode() == PcodeOp.CALLOTHER && language
+						.getUserDefinedOpName((int) op.getInput(0).getOffset())
+						.startsWith("returnFrom");
+			}
+			if (!interrupt) {
+				return false;
+			}
+			found = true;
 		}
-		return false;
+		return found;
 	}
 }
