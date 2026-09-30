@@ -116,7 +116,7 @@ final class E200Peripherals {
 		}
 		catch (IOException e) {
 			String message = "Could not read the peripheral description: " + e.getMessage();
-			Msg.warn(this, message);
+			Msg.warn(E200Analyzer.class, message);
 			log.appendMsg(E200Analyzer.NAME, message);
 			return false;
 		}
@@ -224,7 +224,7 @@ final class E200Peripherals {
 			}
 			int pointers = typeBaseAddressTables(typesAt, monitor);
 			if (typed > 0 || pointers > 0) {
-				Msg.info(E200Peripherals.class, "Added " + typed + " peripherals of " +
+				Msg.info(E200Analyzer.class, "Added " + typed + " peripherals of " +
 					device.name + " (" + blocks + " memory blocks) and typed " + pointers +
 					" pointers to them");
 			}
@@ -326,7 +326,7 @@ final class E200Peripherals {
 					count++;
 				}
 				catch (LockException | MemoryConflictException | AddressOverflowException e) {
-					Msg.info(E200Peripherals.class,
+					Msg.info(E200Analyzer.class,
 						"Could not add " + name + ": " + e.getMessage());
 				}
 			}

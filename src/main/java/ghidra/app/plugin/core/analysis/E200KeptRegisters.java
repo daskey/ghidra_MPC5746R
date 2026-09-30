@@ -126,7 +126,7 @@ final class E200KeptRegisters {
 			identified.addAll(callers);
 		}
 		if (changed > 0) {
-			Msg.info(E200KeptRegisters.class, "Set the calling convention of " + changed +
+			Msg.info(E200Analyzer.class, "Set the calling convention of " + changed +
 				" functions that keep registers their callers use" +
 				(added.isEmpty() ? "" : "; added " + String.join(", ", added)));
 		}
@@ -195,7 +195,7 @@ final class E200KeptRegisters {
 			function.setCallingConvention(name);
 		}
 		catch (Exception e) {
-			Msg.warn(E200KeptRegisters.class,
+			Msg.warn(E200Analyzer.class,
 				"Could not set the calling convention of " + function + ": " + e);
 		}
 	}

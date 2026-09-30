@@ -65,15 +65,15 @@ public class E200Analyzer extends AbstractAnalyzer {
 	private final E200Functions functions = new E200Functions();
 	private final E200DataTypes dataTypes = new E200DataTypes();
 
-	private final Stage peripheralStage = new Stage("peripherals",
-		AnalysisPriority.DATA_TYPE_PROPOGATION.after().after(),
-		(program, analyzed, monitor, log) -> peripherals.apply(program, monitor, log));
+	private final Stage peripheralStage =
+		new Stage(AnalysisPriority.DATA_TYPE_PROPOGATION.after().after(),
+			(program, analyzed, monitor, log) -> peripherals.apply(program, monitor, log));
 	// after Decompiler Parameter ID, which commits the prototypes the steps work with
-	private final Stage functionStage = new Stage("functions",
+	private final Stage functionStage = new Stage(
 		AnalysisPriority.DATA_TYPE_PROPOGATION.after().after().after(), this::completeFunctions);
-	private final Stage dataTypeStage = new Stage("data types",
-		AnalysisPriority.DATA_TYPE_PROPOGATION.after().after().after().after(),
-		(program, analyzed, monitor, log) -> dataTypes.apply(program, analyzed, monitor));
+	private final Stage dataTypeStage =
+		new Stage(AnalysisPriority.DATA_TYPE_PROPOGATION.after().after().after().after(),
+			(program, analyzed, monitor, log) -> dataTypes.apply(program, analyzed, monitor));
 	private final List<Stage> stages = List.of(peripheralStage, functionStage, dataTypeStage);
 
 	public E200Analyzer() {
@@ -151,9 +151,10 @@ public class E200Analyzer extends AbstractAnalyzer {
 	}
 
 	/**
-	 * A step that runs later in analysis, at its own priority, scheduled as one-time analysis.
-	 * It handles the functions it has not handled before, and those at the start of code this
-	 * analyzer was given since it last ran, as when it runs as one-time analysis on a selection.
+	 * A step that runs later in analysis, at its own priority, scheduled as one-time analysis
+	 * under the name of this analyzer. It handles the functions it has not handled before, and
+	 * those at the start of code this analyzer was given since it last ran, as when it runs as
+	 * one-time analysis on a selection.
 	 */
 	private static final class Stage extends AbstractAnalyzer {
 		private final Step step;
@@ -161,8 +162,8 @@ public class E200Analyzer extends AbstractAnalyzer {
 		private final AddressSet requested = new AddressSet();
 		private boolean scheduled;
 
-		Stage(String name, AnalysisPriority priority, Step step) {
-			super(NAME + " - " + name, "", AnalyzerType.FUNCTION_ANALYZER);
+		Stage(AnalysisPriority priority, Step step) {
+			super(NAME, DESCRIPTION, AnalyzerType.FUNCTION_ANALYZER);
 			setPriority(priority);
 			this.step = step;
 		}

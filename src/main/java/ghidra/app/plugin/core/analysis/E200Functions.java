@@ -141,12 +141,12 @@ final class E200Functions {
 				changed++;
 			}
 			catch (InvalidInputException | DuplicateNameException e) {
-				Msg.warn(E200Functions.class,
+				Msg.warn(E200Analyzer.class,
 					"Could not set the signature of " + function + ": " + e);
 			}
 		}
 		if (changed > 0) {
-			Msg.info(E200Functions.class,
+			Msg.info(E200Analyzer.class,
 				"Set the signature of " + changed + " interrupt handlers to void f(void)");
 		}
 	}

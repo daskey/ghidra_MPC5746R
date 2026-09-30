@@ -236,22 +236,23 @@ final class E200DataTypes {
 					new HashSet<>(), true, typed, monitor);
 			}
 			if (typed[1] > 0) {
-				Msg.info(this, "Created data at " + typed[1] +
+				Msg.info(E200Analyzer.class, "Created data at " + typed[1] +
 					" arrays that code indexes and addresses it uses as pointers");
 			}
 			if (typed[0] > 0) {
-				Msg.info(this, "Typed " + typed[0] + " global variables from their uses");
+				Msg.info(E200Analyzer.class,
+					"Typed " + typed[0] + " global variables from their uses");
 			}
 			if (typed[2] > 0) {
-				Msg.info(this, "Typed " + typed[2] +
+				Msg.info(E200Analyzer.class, "Typed " + typed[2] +
 					" parameters, return values and globals from the values passed to them");
 			}
 			if (typed[3] > 0) {
-				Msg.info(this, "Gave " + typed[3] +
+				Msg.info(E200Analyzer.class, "Gave " + typed[3] +
 					" untyped parameters, return values and globals an unsigned type");
 			}
 			if (typed[4] > 0) {
-				Msg.info(this, "Gave " + typed[4] +
+				Msg.info(E200Analyzer.class, "Gave " + typed[4] +
 					" functions that return nothing the return type void");
 			}
 		}
@@ -259,7 +260,7 @@ final class E200DataTypes {
 			throw new CancelledException();
 		}
 		catch (Exception e) {
-			Msg.error(this, "Data type inference failed", e);
+			Msg.error(E200Analyzer.class, "Data type inference failed", e);
 		}
 		return true;
 	}
@@ -469,13 +470,13 @@ final class E200DataTypes {
 					names.add(name);
 				}
 				catch (LockException | MemoryConflictException | AddressOverflowException e) {
-					Msg.info(E200DataTypes.class,
+					Msg.info(E200Analyzer.class,
 						"Could not add " + name + ": " + e.getMessage());
 				}
 			}
 		}
 		if (!names.isEmpty()) {
-			Msg.info(E200DataTypes.class, "Added RAM blocks " + String.join(", ", names));
+			Msg.info(E200Analyzer.class, "Added RAM blocks " + String.join(", ", names));
 		}
 		return added;
 	}
