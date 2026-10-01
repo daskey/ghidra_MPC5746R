@@ -195,15 +195,15 @@ final class E200ConstantPropagation extends ConstantPropagationAnalyzer {
 			Long value = symbolValue(program, base[1]);
 			if (value != null) {
 				setValue(program, reg, free, value);
-				Msg.info(this, "Assuming " + reg + " = 0x" + Long.toHexString(value) + " (" +
-					base[1] + ") in " + where);
+				Msg.info(E200Analyzer.class, "Assuming " + reg + " = 0x" +
+					Long.toHexString(value) + " (" + base[1] + ") in " + where);
 				continue;
 			}
 			SortedMap<Long, List<Address>> loads = findStartupLoads(program, reg, monitor);
 			if (loads.size() == 1) {
 				value = loads.firstKey();
 				setValue(program, reg, free, value);
-				Msg.info(this, "Assuming " + reg + " = 0x" + Long.toHexString(value) +
+				Msg.info(E200Analyzer.class, "Assuming " + reg + " = 0x" + Long.toHexString(value) +
 					" (startup code at " + loads.get(value) + ") in " + where);
 			}
 			else if (loads.size() > 1) {
@@ -272,7 +272,7 @@ final class E200ConstantPropagation extends ConstantPropagationAnalyzer {
 			}
 			long value = entry.getKey();
 			setValue(program, reg, region, value);
-			Msg.info(this, "Assuming " + reg + " = 0x" + Long.toHexString(value) +
+			Msg.info(E200Analyzer.class, "Assuming " + reg + " = 0x" + Long.toHexString(value) +
 				" (startup code at " + loads.get(value) + ") in " + describe(region));
 		}
 	}
@@ -475,7 +475,7 @@ final class E200ConstantPropagation extends ConstantPropagationAnalyzer {
 
 	private Long symbolValue(Program program, String name) {
 		Symbol symbol = SymbolUtilities.getLabelOrFunctionSymbol(program, name,
-			err -> Msg.info(this, err));
+			err -> Msg.info(E200Analyzer.class, err));
 		return symbol == null ? null : symbol.getAddress().getOffset();
 	}
 

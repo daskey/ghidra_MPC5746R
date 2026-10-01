@@ -110,7 +110,7 @@ final class E200CodeGaps {
 			}
 		}
 		if (found > 0) {
-			Msg.info(E200CodeGaps.class, "Found " + found + " functions in gaps between functions");
+			Msg.info(E200Analyzer.class, "Found " + found + " functions in gaps between functions");
 		}
 		return found;
 	}

@@ -175,7 +175,7 @@ final class E200EntryPoints {
 			program.getSymbolTable().addExternalEntryPoint(vector);
 			manager.disassemble(vector);
 			manager.createFunction(vector, false);
-			Msg.info(this, "Boot header at " + header + ": reset vector " + vector);
+			Msg.info(E200Analyzer.class, "Boot header at " + header + ": reset vector " + vector);
 		}
 	}
 
@@ -274,7 +274,7 @@ final class E200EntryPoints {
 				manager.createFunction(handler, false);
 			}
 		}
-		Msg.info(this, "Interrupt vector table at " + table + ": " + handlers.size() +
+		Msg.info(E200Analyzer.class, "Interrupt vector table at " + table + ": " + handlers.size() +
 			" vectors");
 	}
 

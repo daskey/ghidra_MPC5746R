@@ -461,7 +461,7 @@ final class E200TypeFlow {
 			return true;
 		}
 		catch (InvalidInputException e) {
-			Msg.warn(E200TypeFlow.class, "Could not type " + s + ": " + e.getMessage());
+			Msg.warn(E200Analyzer.class, "Could not type " + s + ": " + e.getMessage());
 			return false;
 		}
 	}
