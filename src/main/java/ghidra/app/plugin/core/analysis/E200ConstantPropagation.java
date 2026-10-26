@@ -163,7 +163,78 @@ final class E200ConstantPropagation extends ConstantPropagationAnalyzer {
 				assumeSmallDataBases(program, code, monitor);
 			}
 		}
-		return super.added(program, set, monitor, log);
+		boolean ok = super.added(program, set, monitor, log);
+		addIndexedBaseReferences(program, set, monitor);
+		return ok;
+	}
+
+	/**
+	 * Adds references to the base addresses of arrays accessed with split base indexing,
+	 * where code computes {@code rD = (rIdx + lo) + (ha << 16)} via {@code e_add16i}/{@code e_addi}
+	 * followed by {@code e_add2is}.
+	 */
+	private static void addIndexedBaseReferences(Program program, AddressSetView set,
+			TaskMonitor monitor) throws CancelledException {
+		Listing listing = program.getListing();
+		Memory memory = program.getMemory();
+		ReferenceManager refManager = program.getReferenceManager();
+		AddressSpace space = program.getAddressFactory().getDefaultAddressSpace();
+		InstructionIterator instructions = listing.getInstructions(set, true);
+		while (instructions.hasNext()) {
+			monitor.checkCancelled();
+			Instruction ins = instructions.next();
+			String mnemonic = ins.getMnemonicString();
+			if (!mnemonic.equals("e_add16i") && !mnemonic.equals("e_addi")) {
+				continue;
+			}
+			Register rD = ins.getRegister(0);
+			Register rA = ins.getRegister(1);
+			Scalar loScalar = ins.getScalar(2);
+			if (rD == null || rA == null || loScalar == null) {
+				continue;
+			}
+			String regName = rA.getName();
+			if (regName.equals("r1") || regName.equals("r2") || regName.equals("r13")) {
+				continue;
+			}
+			short lo = (short) loScalar.getValue();
+			Instruction next = ins;
+			for (int i = 0; i < 4; i++) {
+				next = next.getNext();
+				if (next == null || next.getFlowType().isJump() || next.getFlowType().isCall() ||
+					next.getFlowType().isTerminal()) {
+					break;
+				}
+				if ("e_add2is".equals(next.getMnemonicString())) {
+					Register rD2 = next.getRegister(0);
+					Scalar haScalar = next.getScalar(1);
+					if (rD.equals(rD2) && haScalar != null) {
+						long ha = haScalar.getValue();
+						long target = ((ha << 16) + lo) & 0xffffffffL;
+						if (target != 0) {
+							Address targetAddr = space.getAddress(target);
+							if (memory.contains(targetAddr)) {
+								boolean hasRef = false;
+								for (Reference ref : refManager.getReferencesFrom(next.getMinAddress(), 1)) {
+									if (ref.getToAddress().equals(targetAddr)) {
+										hasRef = true;
+										break;
+									}
+								}
+								if (!hasRef) {
+									refManager.addMemoryReference(next.getMinAddress(), targetAddr,
+										RefType.DATA, SourceType.ANALYSIS, 1);
+								}
+							}
+						}
+					}
+					break;
+				}
+				if (writes(next, rD)) {
+					break;
+				}
+			}
+		}
 	}
 
 	// ---- Small data area bases ------------------------------------------------------------

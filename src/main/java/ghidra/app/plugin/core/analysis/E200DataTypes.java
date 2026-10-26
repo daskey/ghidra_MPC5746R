@@ -215,6 +215,13 @@ final class E200DataTypes {
 				// the functions whose code the new types change
 				Set<Function> affected = using(program, changedGlobals);
 				Set<Function> pointing = using(program, pointers(program, changedGlobals));
+				for (Result r : results.values()) {
+					for (Use u : r.uses()) {
+						if (changedGlobals.contains(u.address())) {
+							affected.add(r.function());
+						}
+					}
+				}
 				for (Function f : changedFunctions) {
 					affected.add(f);
 					affected.addAll(callers(f, monitor));
@@ -306,10 +313,10 @@ final class E200DataTypes {
 					continue;
 				}
 				Data data = listing.getDefinedDataAt(use.address());
-				if (data == null && use.access() != Access.VALUE) {
+				if (data == null) {
 					undefined.computeIfAbsent(use.address(), a -> new ArrayList<>()).add(use);
 				}
-				else if (data != null && Undefined.isUndefined(data.getDataType()) &&
+				else if (Undefined.isUndefined(data.getDataType()) &&
 					use.type() != null && use.type().getLength() == data.getLength()) {
 					if (!Undefined.isUndefined(use.type())) {
 						uses.computeIfAbsent(use.address(), a -> new ArrayList<>())
@@ -321,7 +328,7 @@ final class E200DataTypes {
 				}
 			}
 		}
-		List<Address> created = createData(program, undefined, uses);
+		List<Address> created = createData(program, undefined, uses, elements);
 		changedGlobals.addAll(created);
 		typed[1] += created.size();
 
@@ -526,9 +533,13 @@ final class E200DataTypes {
 		}
 	}
 
-	/** Returns the size of the loads or stores of an instruction, or 0 if they differ. */
+	/**
+	 * Returns the size of the load or store of an instruction, or 0 if there are multiple or
+	 * differing sizes.
+	 */
 	private static int accessSize(Instruction instr) {
 		int size = 0;
+		int count = 0;
 		for (PcodeOp op : instr.getPcode()) {
 			int opSize = switch (op.getOpcode()) {
 				case PcodeOp.LOAD -> op.getOutput().getSize();
@@ -536,13 +547,14 @@ final class E200DataTypes {
 				default -> 0;
 			};
 			if (opSize != 0) {
+				count++;
 				if (size != 0 && size != opSize) {
 					return 0;
 				}
 				size = opSize;
 			}
 		}
-		return size;
+		return count == 1 ? size : 0;
 	}
 
 	/**
@@ -596,7 +608,7 @@ final class E200DataTypes {
 	 * @return the addresses given data
 	 */
 	private static List<Address> createData(Program program, Map<Address, List<Use>> undefined,
-			Map<Address, List<DataType>> uses) {
+			Map<Address, List<DataType>> uses, E200TypeFlow.Facts elements) {
 		Listing listing = program.getListing();
 		Memory memory = program.getMemory();
 		FunctionManager functions = program.getFunctionManager();
@@ -640,6 +652,9 @@ final class E200DataTypes {
 					!Undefined.isUndefined(use.type()) && use.type().getLength() == size) {
 					uses.computeIfAbsent(base, a -> new ArrayList<>()).add(use.type());
 				}
+				if (use.access() == Access.INDEXED && use.type() != null) {
+					elements.type(new E200TypeFlow.Global(base), use.type());
+				}
 			}
 		}
 		return created;
@@ -663,6 +678,7 @@ final class E200DataTypes {
 
 	private static List<Use> globalUses(HighFunction high) {
 		List<Use> uses = new ArrayList<>();
+		Listing listing = high.getFunction().getProgram().getListing();
 		Iterator<HighSymbol> it = high.getGlobalSymbolMap().getSymbols();
 		while (it.hasNext()) {
 			HighSymbol symbol = it.next();
@@ -672,10 +688,13 @@ final class E200DataTypes {
 				continue;
 			}
 			DataType type = variable.getDataType();
-			if (type != null && !Undefined.isUndefined(type) &&
-				type.getLength() == symbol.getSize()) {
-				uses.add(new Use(symbol.getStorage().getMinAddress(), type, type.getLength(),
-					Access.VALUE));
+			if (type != null && !Undefined.isUndefined(type)) {
+				Address addr = symbol.getStorage().getMinAddress();
+				Data data = listing.getDefinedDataAt(addr);
+				int expectedSize = data != null ? data.getLength() : symbol.getSize();
+				if (type.getLength() == expectedSize || (data == null && symbol.getSize() <= 1)) {
+					uses.add(new Use(addr, type, type.getLength(), Access.VALUE));
+				}
 			}
 		}
 		AddressSpace space =
@@ -690,7 +709,7 @@ final class E200DataTypes {
 				// the address of a global, used as a pointer: to itself or to the cast type
 				long target = op.getInput(1).getOffset();
 				if (target > 0 && target <= max) {
-					for (DataType type : pointedTo(op.getOutput())) {
+					for (DataType type : pointedTo(high, op.getOutput())) {
 						uses.add(new Use(space.getAddress(target), type, type.getLength(),
 							Access.ADDRESS));
 					}
@@ -714,29 +733,58 @@ final class E200DataTypes {
 	}
 
 	/**
-	 * The types a pointer points to, as its own type and the types it is cast to, where they
-	 * are numbers or pointers of 1, 2, 4 or 8 bytes
+	 * The types a pointer points to, as its own type, the types it is cast to, and callee
+	 * parameter types where passed as an argument, for numbers or pointers of 1, 2, 4 or 8 bytes.
 	 */
-	private static List<DataType> pointedTo(Varnode pointer) {
+	private static List<DataType> pointedTo(HighFunction high, Varnode pointer) {
+		FunctionManager functions = high.getFunction().getProgram().getFunctionManager();
 		List<DataType> types = new ArrayList<>();
-		List<Varnode> views = new ArrayList<>();
-		views.add(pointer);
-		Iterator<PcodeOp> uses = pointer.getDescendants();
-		while (uses.hasNext()) {
-			PcodeOp use = uses.next();
-			if (use.getOpcode() == PcodeOp.CAST && use.getOutput() != null) {
-				views.add(use.getOutput());
-			}
-		}
-		for (Varnode v : views) {
-			HighVariable high = v.getHigh();
-			if (high != null && high.getDataType() instanceof Pointer p &&
-				E200TypeFlow.informative(p)) {
+		Set<Varnode> visited = new HashSet<>();
+		Deque<Varnode> queue = new ArrayDeque<>();
+		queue.add(pointer);
+		visited.add(pointer);
+		while (!queue.isEmpty()) {
+			Varnode v = queue.removeFirst();
+			HighVariable hv = v.getHigh();
+			if (hv != null && hv.getDataType() instanceof Pointer p) {
 				DataType target = p.getDataType();
-				int length = target.getLength();
-				if (kind(target) != Kind.OTHER &&
-					(length == 1 || length == 2 || length == 4 || length == 8)) {
-					types.add(target);
+				if (target != null) {
+					int length = target.getLength();
+					if ((kind(target) != Kind.OTHER || Undefined.isUndefined(target)) &&
+						(length == 1 || length == 2 || length == 4 || length == 8)) {
+						types.add(target);
+					}
+				}
+			}
+			Iterator<PcodeOp> uses = v.getDescendants();
+			while (uses.hasNext()) {
+				PcodeOp use = uses.next();
+				int opcode = use.getOpcode();
+				if ((opcode == PcodeOp.CAST || opcode == PcodeOp.COPY || opcode == PcodeOp.PTRADD ||
+					opcode == PcodeOp.MULTIEQUAL) && use.getOutput() != null) {
+					if (visited.add(use.getOutput())) {
+						queue.add(use.getOutput());
+					}
+				}
+				else if (opcode == PcodeOp.CALL) {
+					Function callee = E200TypeFlow.callee(functions, use);
+					if (callee != null) {
+						for (int i = 1; i < use.getNumInputs(); i++) {
+							if (use.getInput(i) == v && i - 1 < callee.getParameterCount()) {
+								DataType paramType = callee.getParameter(i - 1).getDataType();
+								if (paramType instanceof Pointer p) {
+									DataType target = p.getDataType();
+									if (target != null) {
+										int length = target.getLength();
+										if ((kind(target) != Kind.OTHER || Undefined.isUndefined(target)) &&
+											(length == 1 || length == 2 || length == 4 || length == 8)) {
+											types.add(target);
+										}
+									}
+								}
+							}
+						}
+					}
 				}
 			}
 		}
@@ -803,9 +851,18 @@ final class E200DataTypes {
 	 * @return the type or null
 	 */
 	static DataType chooseType(List<DataType> types, boolean signedChar, boolean floatWins) {
+		return chooseType(types, signedChar, floatWins, false);
+	}
+
+	static DataType chooseType(List<DataType> types, boolean signedChar, boolean floatWins,
+			boolean unsignedTieBreak) {
+		List<DataType> norm = new ArrayList<>(types.size());
+		for (DataType t : types) {
+			norm.add(normalizeChars(t, signedChar));
+		}
 		Map<String, DataType> distinct = new LinkedHashMap<>();
 		Map<String, Integer> counts = new HashMap<>();
-		for (DataType type : types) {
+		for (DataType type : norm) {
 			if (kind(type) == Kind.OTHER) {
 				return null;
 			}
@@ -820,20 +877,32 @@ final class E200DataTypes {
 		else if (!distinct.isEmpty()) {
 			int length = -1;
 			List<DataType> floats = new ArrayList<>();
+			boolean allPointers = true;
 			for (DataType type : distinct.values()) {
 				if (length >= 0 && type.getLength() != length) {
 					return null;
 				}
 				length = type.getLength();
+				if (kind(type) != Kind.POINTER) {
+					allPointers = false;
+				}
 				switch (kind(type)) {
 					case FLOAT -> floats.add(type);
-					case INTEGER -> {
-						// copies and bit tests of a value look like integer uses
+					case INTEGER, POINTER -> {
 					}
 					default -> {
 						return null;
 					}
 				}
+			}
+			if (allPointers) {
+				List<DataType> targets = distinct.values()
+						.stream()
+						.map(p -> ((Pointer) p).getDataType())
+						.filter(Objects::nonNull)
+						.toList();
+				DataType targetType = chooseType(targets, signedChar, floatWins, unsignedTieBreak);
+				return targetType == null ? null : new PointerDataType(targetType, length);
 			}
 			if (floats.size() == 1 && floatWins) {
 				chosen = floats.get(0);
@@ -853,17 +922,65 @@ final class E200DataTypes {
 					}
 				}
 				if (tie) {
-					return null;
+					if (unsignedTieBreak) {
+						for (Map.Entry<String, Integer> e : counts.entrySet()) {
+							if (e.getValue() == best) {
+								DataType dt = distinct.get(e.getKey());
+								if (isUnsigned(dt)) {
+									chosen = dt;
+									tie = false;
+									break;
+								}
+							}
+						}
+						if (tie) {
+							chosen = unsigned(length);
+							tie = false;
+						}
+					}
+					else {
+						return null;
+					}
 				}
 			}
 		}
-		// single bytes in firmware are numbers, not characters
-		if (chosen instanceof Pointer pointer && pointer.getDataType() != null &&
-			isChar(pointer.getDataType())) {
-			return new PointerDataType(byteType(pointer.getDataType(), signedChar),
-				pointer.getLength());
+		return chosen;
+	}
+
+	private static DataType normalizeChars(DataType type, boolean signedChar) {
+		if (type == null) {
+			return null;
 		}
-		return isChar(chosen) ? byteType(chosen, signedChar) : chosen;
+		if (isChar(type)) {
+			return byteType(type, signedChar);
+		}
+		if (type instanceof Pointer p) {
+			DataType target = p.getDataType();
+			if (target != null) {
+				DataType normTarget = normalizeChars(target, signedChar);
+				if (normTarget != target) {
+					return new PointerDataType(normTarget, p.getLength());
+				}
+			}
+		}
+		return type;
+	}
+
+	private static boolean isUnsigned(DataType dt) {
+		DataType base = dt instanceof TypeDef t ? t.getBaseDataType() : dt;
+		return base instanceof UnsignedIntegerDataType || base instanceof UnsignedShortDataType ||
+			base instanceof ByteDataType || base instanceof UnsignedLongLongDataType ||
+			(base instanceof Pointer p && isUnsigned(p.getDataType()));
+	}
+
+	static DataType unsigned(int length) {
+		return switch (length) {
+			case 1 -> ByteDataType.dataType;
+			case 2 -> UnsignedShortDataType.dataType;
+			case 4 -> UnsignedIntegerDataType.dataType;
+			case 8 -> UnsignedLongLongDataType.dataType;
+			default -> null;
+		};
 	}
 
 	private static boolean isChar(DataType type) {

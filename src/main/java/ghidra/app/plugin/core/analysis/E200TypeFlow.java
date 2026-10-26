@@ -117,6 +117,9 @@ final class E200TypeFlow {
 		if (returned == null || returned instanceof VoidDataType) {
 			facts.returnsNothing = entry;
 		}
+		else if (!(returned instanceof DefaultDataType)) {
+			facts.type(new Return(entry), returned);
+		}
 		LocalSymbolMap locals = high.getLocalSymbolMap();
 		for (int i = 0; i < locals.getNumParams(); i++) {
 			HighSymbol param = locals.getParamSymbol(i);
@@ -229,7 +232,7 @@ final class E200TypeFlow {
 	}
 
 	/** The function a call goes to, past thunks, or null */
-	private static Function callee(FunctionManager functions, PcodeOp call) {
+	static Function callee(FunctionManager functions, PcodeOp call) {
 		Varnode target = call.getInput(0);
 		if (target == null || !target.isAddress()) {
 			return null;
@@ -243,8 +246,14 @@ final class E200TypeFlow {
 
 	/** The type the decompiler gives a value, informative or not; null for constants */
 	private static DataType type(Varnode v) {
-		if (v == null || v.isConstant() || v.getHigh() == null ||
-			v.getHigh() instanceof HighConstant) {
+		if (v == null || v.isConstant() || v.getHigh() == null) {
+			return null;
+		}
+		if (v.getHigh() instanceof HighConstant) {
+			DataType dt = v.getHigh().getDataType();
+			if (dt instanceof Pointer) {
+				return dt;
+			}
 			return null;
 		}
 		return v.getHigh().getDataType();
@@ -257,8 +266,7 @@ final class E200TypeFlow {
 		}
 		if (type instanceof Pointer pointer) {
 			DataType target = pointer.getDataType();
-			return target != null && !Undefined.isUndefined(target) &&
-				!(target instanceof VoidDataType);
+			return target != null && informative(target);
 		}
 		return true;
 	}
@@ -283,7 +291,11 @@ final class E200TypeFlow {
 		Map<Slot, Slot> parent = new HashMap<>();
 		globalTypes.forEach((a, types) -> seen.computeIfAbsent(new Global(a),
 			s -> new ArrayList<>()).addAll(types));
+		Set<Address> noReturns = new HashSet<>();
 		for (Facts f : facts) {
+			if (f.returnsNothing != null) {
+				noReturns.add(f.returnsNothing);
+			}
 			for (Map.Entry<Slot, DataType> t : f.types) {
 				seen.computeIfAbsent(t.getKey(), s -> new ArrayList<>()).add(t.getValue());
 			}
@@ -303,11 +315,14 @@ final class E200TypeFlow {
 		Typed typed = new Typed(new ArrayList<>(), new ArrayList<>(), new ArrayList<>());
 		for (Slot s : slots) {
 			monitor.checkCancelled();
+			if (s instanceof Return r && noReturns.contains(r.function())) {
+				continue;
+			}
 			List<DataType> group = groups.get(find(parent, s));
 			DataType type = E200DataTypes.chooseType(
-				informativeOnly(seen.getOrDefault(s, List.of())), signedChar, false);
+				informativeOnly(seen.getOrDefault(s, List.of())), signedChar, false, defaults);
 			if (type == null) {
-				type = E200DataTypes.chooseType(informativeOnly(group), signedChar, false);
+				type = E200DataTypes.chooseType(informativeOnly(group), signedChar, false, defaults);
 			}
 			List<Slot> list = typed.fromValues();
 			if (type == null) {
@@ -317,17 +332,16 @@ final class E200TypeFlow {
 				type = defaultType(current(program, s), group);
 				list = typed.byDefault();
 			}
-			if (type != null && set(program, s, type, globals, complete)) {
+			if (type != null && set(program, s, type, globals, complete, noReturns)) {
 				list.add(s);
 			}
 		}
 		if (defaults) {
 			// Decompiler Parameter ID leaves the return type of a function that returns
 			// nothing undefined, since it does not know whether a caller uses a result
-			for (Facts f : facts) {
-				Slot r = f.returnsNothing == null ? null : new Return(f.returnsNothing);
-				if (r != null && !seen.containsKey(r) && !parent.containsKey(r) &&
-					set(program, r, VoidDataType.dataType, globals, complete)) {
+			for (Address entry : noReturns) {
+				Slot r = new Return(entry);
+				if (set(program, r, VoidDataType.dataType, globals, complete, noReturns)) {
 					typed.voids().add(r);
 				}
 			}
@@ -350,29 +364,49 @@ final class E200TypeFlow {
 		}
 		if (current instanceof Pointer pointer) {
 			DataType target = pointer.getDataType();
-			DataType unsigned = target == null ? null : unsigned(target);
-			if (unsigned == null) {
+			if (target == null) {
+				return null;
+			}
+			DataType unsignedTarget;
+			if (target instanceof Pointer pTarget) {
+				unsignedTarget = defaultType(pTarget, group);
+			}
+			else {
+				unsignedTarget = unsigned(target);
+			}
+			if (unsignedTarget == null) {
 				return null;
 			}
 			for (DataType t : group) {
-				if (!(t instanceof Pointer p) || p.getDataType() == null ||
-					!Undefined.isUndefined(p.getDataType()) ||
-					p.getDataType().getLength() != target.getLength()) {
-					return null; // a value in the group is not a pointer to data of that size
+				if (t instanceof Pointer p) {
+					if (p.getDataType() == null || !fits(p.getDataType(), unsignedTarget)) {
+						return null;
+					}
+				}
+				else if (!Undefined.isUndefined(t) || t.getLength() != pointer.getLength()) {
+					return null;
 				}
 			}
-			return new PointerDataType(unsigned, pointer.getLength());
+			return new PointerDataType(unsignedTarget, pointer.getLength());
 		}
 		DataType unsigned = unsigned(current);
+		if (unsigned == null) {
+			return null;
+		}
 		for (DataType t : group) {
-			if (!Undefined.isUndefined(t) || t.getLength() != current.getLength()) {
-				return null; // a pointer, or of another size
+			if (t instanceof Pointer p) {
+				if (current.getLength() != p.getLength()) {
+					return null;
+				}
+			}
+			else if (!Undefined.isUndefined(t) || t.getLength() != current.getLength()) {
+				return null;
 			}
 		}
 		return unsigned;
 	}
 
-	/** The unsigned integer of the size of undefined data of 1, 2 or 4 bytes, or null */
+	/** The unsigned integer of the size of undefined data of 1, 2, 4 or 8 bytes, or null */
 	private static DataType unsigned(DataType undefined) {
 		if (!Undefined.isUndefined(undefined) || undefined instanceof DefaultDataType) {
 			return null;
@@ -381,6 +415,7 @@ final class E200TypeFlow {
 			case 1 -> ByteDataType.dataType;
 			case 2 -> UnsignedShortDataType.dataType;
 			case 4 -> UnsignedIntegerDataType.dataType;
+			case 8 -> UnsignedLongLongDataType.dataType;
 			default -> null;
 		};
 	}
@@ -391,11 +426,20 @@ final class E200TypeFlow {
 	 */
 	static boolean open(Program program, Slot s) {
 		DataType current = current(program, s);
+		return isOpen(current);
+	}
+
+	private static boolean isOpen(DataType current) {
 		if (current == null || current instanceof DefaultDataType) {
 			return false;
 		}
-		return Undefined.isUndefined(current) || current instanceof Pointer p &&
-			p.getDataType() != null && Undefined.isUndefined(p.getDataType());
+		if (Undefined.isUndefined(current)) {
+			return true;
+		}
+		if (current instanceof Pointer p) {
+			return p.getDataType() != null && isOpen(p.getDataType());
+		}
+		return false;
 	}
 
 	/** The current type of a place, or null if it is not there */
@@ -423,7 +467,7 @@ final class E200TypeFlow {
 
 	/** Gives a place of undefined type the type, if it fits and may change; returns whether */
 	private static boolean set(Program program, Slot s, DataType type, Set<Address> globals,
-			Set<Function> complete) {
+			Set<Function> complete, Set<Address> noReturns) {
 		try {
 			if (s instanceof Global g) {
 				Data data = program.getListing().getDefinedDataAt(g.address());
@@ -448,14 +492,20 @@ final class E200TypeFlow {
 				return true;
 			}
 			if (type instanceof VoidDataType) { // for a return value not known
-				if (!(f.getReturnType() instanceof DefaultDataType)) {
+				if (!(f.getReturnType() instanceof DefaultDataType) &&
+					!Undefined.isUndefined(f.getReturnType())) {
 					return false;
 				}
 			}
-			// DEFAULT: no known return value
-			else if (f.getReturnType() instanceof DefaultDataType ||
-				!fits(f.getReturnType(), type)) {
-				return false;
+			else {
+				if (f.getReturnType() instanceof DefaultDataType) {
+					if (noReturns != null && noReturns.contains(f.getEntryPoint())) {
+						return false;
+					}
+				}
+				else if (!fits(f.getReturnType(), type)) {
+					return false;
+				}
 			}
 			f.setReturnType(type, SourceType.ANALYSIS);
 			return true;
@@ -472,7 +522,7 @@ final class E200TypeFlow {
 	 * {@code undefined})
 	 */
 	static boolean fits(DataType current, DataType type) {
-		if (current == null || type.getLength() != current.getLength()) {
+		if (current == null || type == null || type.getLength() != current.getLength()) {
 			return false;
 		}
 		if (Undefined.isUndefined(current)) {
@@ -481,10 +531,16 @@ final class E200TypeFlow {
 		if (current instanceof Pointer p && type instanceof Pointer q) {
 			DataType from = p.getDataType();
 			DataType to = q.getDataType();
-			if (from == null || !Undefined.isUndefined(from) || to == null) {
+			if (from == null || to == null) {
 				return false;
 			}
-			return from instanceof DefaultDataType || to.getLength() == from.getLength();
+			if (from instanceof DefaultDataType) {
+				return true;
+			}
+			if (Undefined.isUndefined(from)) {
+				return to.getLength() == from.getLength();
+			}
+			return fits(from, to);
 		}
 		return false;
 	}

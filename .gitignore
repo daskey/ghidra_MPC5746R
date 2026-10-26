@@ -7,13 +7,19 @@ data/languages/*.sla.lock
 build/
 dist/
 
-# tools/lsp_test output
+# tools/lsp_test and tools/vle_test output
 lsp_tests.bin
 lsp_tests.tsv
 lsp_tests.meta
 lsp_results.tsv
 __pycache__/
+vle_tests.bin
+results.tsv
+blank.bin
 
-# Eclipse and copied dependencies
+# Eclipse, class files, and copied dependencies
 bin/
 lib/
+*.class
+*.jar
+
