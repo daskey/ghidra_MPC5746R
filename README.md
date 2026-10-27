@@ -25,7 +25,7 @@ separate files:
 - `e200_isa.sinc`:
   - MPU (`mpure`, `mpuwe`, `mpusync`), decorated storage including the cache bypass forms,
     `wait`, `e_ldmvmcsrrw`/`e_stmvmcsrrw`, `nego`, `lwarx` with EH=1, `dcbt`/`dcbtst` with a
-    cache target
+    cache target, the loads that bypass the data cache (`lbcbx`, `lhcbx`, `lwcbx`)
   - the saturated math of the e200z425 (`e_addwus`, `e_addhus`, ..., `e_addwss`)
   - corrections of Ghidra's VLE instructions:
     - `e_ori.` no longer decodes as `e_nop`; `e_cmp16i` and related instructions are no
@@ -282,6 +282,9 @@ the Ghidra release whose PowerPC files are included.
 
 ### Differences from GNU objdump
 
+- `lbcbx`, `lhcbx` and `lwcbx` (X-form, XO 516, 548 and 580) decode; binutils shows them as
+  data. AUTOSAR OS code for the e200z4 uses XO 548 and 580; XO 516 follows the pattern of
+  the decorated forms.
 - Encodings with nonzero reserved fields are not decoded, for example EFPU2 compares with
   bits 9-10 set, or `efsabs` with a nonzero rB.
 - LSP encodings the manual defines as illegal are not decoded: an odd rD or rS for
