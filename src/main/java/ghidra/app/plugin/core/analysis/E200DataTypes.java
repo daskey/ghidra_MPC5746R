@@ -202,14 +202,16 @@ final class E200DataTypes {
 				}
 			}
 
-			// globals from their uses, arrays, places from values, places by default, voids
-			int[] typed = new int[5];
+			// globals from their uses, arrays, places from values, places by default, voids,
+			// results passed on
+			int[] typed = new int[6];
+			E200PassedResults passed = new E200PassedResults(program);
 			for (int round = 1; round <= MAX_ROUNDS; round++) {
 				monitor.setMessage(E200Analyzer.NAME + " - applying");
 				Set<Address> changedGlobals = new HashSet<>();
 				Set<Function> changedFunctions = new HashSet<>();
 				if (typeRound(program, results.values(), functions, complete, changedGlobals,
-					changedFunctions, false, typed, monitor) == 0) {
+					changedFunctions, false, passed, typed, monitor) == 0) {
 					break;
 				}
 				// the functions whose code the new types change
@@ -240,7 +242,7 @@ final class E200DataTypes {
 			}
 			if (defaultsOption) {
 				typeRound(program, results.values(), functions, complete, new HashSet<>(),
-					new HashSet<>(), true, typed, monitor);
+					new HashSet<>(), true, passed, typed, monitor);
 			}
 			if (typed[1] > 0) {
 				Msg.info(E200Analyzer.class, "Created data at " + typed[1] +
@@ -262,6 +264,10 @@ final class E200DataTypes {
 				Msg.info(E200Analyzer.class, "Gave " + typed[4] +
 					" functions that return nothing the return type void");
 			}
+			if (typed[5] > 0) {
+				Msg.info(E200Analyzer.class, "Gave " + typed[5] +
+					" functions whose callers use their result a return type");
+			}
 		}
 		catch (CancelledException | InterruptedException e) {
 			throw new CancelledException();
@@ -282,14 +288,16 @@ final class E200DataTypes {
 	 * @param changedGlobals gets the globals typed or created
 	 * @param changedFunctions gets the functions whose parameters or return values are typed
 	 * @param defaults whether to give the places no code gives a type a default type
+	 * @param passed the return types of functions whose callers use their result
 	 * @param typed counts of globals typed, arrays created, places typed, places given a
-	 * default type and functions given a void return type, added to
+	 * default type, functions given a void return type and functions whose callers use their
+	 * result typed, added to
 	 * @return the number of changes
 	 */
 	private static int typeRound(Program program, Collection<Result> results,
 			Set<Function> functions, Set<Function> complete, Set<Address> changedGlobals,
-			Set<Function> changedFunctions, boolean defaults, int[] typed, TaskMonitor monitor)
-			throws CancelledException {
+			Set<Function> changedFunctions, boolean defaults, E200PassedResults passed,
+			int[] typed, TaskMonitor monitor) throws CancelledException {
 		Listing listing = program.getListing();
 		Set<Address> typable = new HashSet<>();
 		for (Result result : results) {
@@ -342,11 +350,25 @@ final class E200DataTypes {
 			}
 		}
 		FunctionManager manager = program.getFunctionManager();
+		// before the functions that return nothing are given void
+		List<Function> passing = passed.apply(monitor);
+		typed[5] += passing.size();
+		changedFunctions.addAll(passing);
 		E200TypeFlow.Typed flow =
 			E200TypeFlow.apply(program, facts, uses, typable, complete, defaults, monitor);
+		// and after, for the functions whose results the flow typed: a wrapper given void
+		// then returns their type
+		passing = passed.apply(monitor);
+		typed[5] += passing.size();
+		changedFunctions.addAll(passing);
 		typed[2] += flow.fromValues().size();
 		typed[3] += flow.byDefault().size();
 		typed[4] += flow.voids().size();
+		for (Function f : passing) {
+			if (flow.voids().contains(new E200TypeFlow.Return(f.getEntryPoint()))) {
+				typed[4]--;
+			}
+		}
 		for (E200TypeFlow.Slot slot : flow.fromValues()) {
 			Address function = null;
 			if (slot instanceof E200TypeFlow.Global g) {

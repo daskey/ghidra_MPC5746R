@@ -404,15 +404,20 @@ final class E200KeptRegisters {
 		 * register {@code unaff_}, even a parameter.
 		 */
 		int kept(Function f) {
+			return ALL & ~changes(f) & ~(inputs(f) & ~parameters(f));
+		}
+
+		/** The volatile registers of the parameters of a function's committed signature */
+		private int parameters(Function f) {
 			int parameters = 0;
-			if (f.getSignatureSource() != SourceType.DEFAULT) {
+			if (f != null && f.getSignatureSource() != SourceType.DEFAULT) {
 				for (Parameter p : f.getParameters()) {
 					for (Varnode v : p.getVariableStorage().getVarnodes()) {
 						parameters |= mask(v);
 					}
 				}
 			}
-			return ALL & ~changes(f) & ~(inputs(f) & ~parameters);
+			return parameters;
 		}
 
 		/** The callers that read registers the function keeps after calling it. */
@@ -474,9 +479,11 @@ final class E200KeptRegisters {
 		/**
 		 * Which of the registers {@code live} the function reads from {@code start} on before
 		 * writing them, following at most {@code limit} instructions. A call reads the registers
-		 * its callee reads before writing them, and writes the ones it changes. Returns are not
-		 * reads of r3 and r4: before Decompiler Parameter ID it is not known whether a function
-		 * returns a value, and most calls of functions that keep r3 would count.
+		 * its callee reads before writing them and those of the parameters of its committed
+		 * signature, which the decompiler passes even where the callee ignores one, and writes
+		 * the ones it changes. Returns are not reads of r3 and r4: before Decompiler Parameter
+		 * ID it is not known whether a function returns a value, and most calls of functions
+		 * that keep r3 would count.
 		 */
 		private int readsBeforeWriting(Function f, Address start, int live, int limit) {
 			AddressSetView body = f.getBody();
@@ -506,7 +513,7 @@ final class E200KeptRegisters {
 					// is not known
 					for (Address target : instruction.getFlows()) {
 						Function callee = functions.getFunctionAt(target);
-						found |= inputs(callee) & mask;
+						found |= (inputs(callee) | parameters(callee)) & mask;
 						mask &= ~changes(callee);
 					}
 					if (flow.isComputed()) {

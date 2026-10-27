@@ -167,8 +167,16 @@ decompiles every function and is the longest part of the analysis):
   values that are only copied, compared for equality or accessed in bytes, get the unsigned
   integer of their size, and pointers to undefined data of 1, 2 or 4 bytes a pointer to it,
   unless a linked value is a pointer, a `float` or of another size. Functions that return
-  nothing, whose result no caller reads, get the return type `void`, which Decompiler
-  Parameter ID leaves undefined.
+  nothing get the return type `void`, which Decompiler Parameter ID leaves undefined.
+- **Results callers use** (`E200PassedResults.java`): e200 compilers do not turn
+  `return g(x);` into a branch to `g`. The function calls `g` and returns with the result of
+  `g` still in r3, which Decompiler Parameter ID misses when `g` had no return type yet. A
+  function whose callers read r3 after calling it, or return it from a function whose result
+  is used, is not given `void`. It gets the return type of the functions whose results it
+  passes on. If it does not only pass results on and an instruction of a caller reads the
+  result, it gets `undefined4`, which the steps above type where they can: Parameter ID also
+  misses results that some paths compute and others get from an indirect call. Without this,
+  callers show such results as `extraout_r3`.
 
 A flash image has no RAM, so RAM variables have no data and the decompiler shows them as
 `_DAT_40001234`. The analyzer therefore first adds uninitialized blocks for the MPC5746R
