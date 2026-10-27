@@ -45,7 +45,10 @@ separate files:
 - `ppc_32_e200.cspec`: the PowerPC EABI of e200 compilers: arguments in r3-r10, floats
   included; results in r3 (r3:r4 for 8 bytes, and structures of up to 8 bytes); unsigned
   `char`; r2 and r13 (small data area bases) preserved; no `__get_pc_thunk_lr` call fixup,
-  which models a classic PowerPC idiom that VLE code cannot execute.
+  which models a classic PowerPC idiom that VLE code cannot execute. MSR and the SPRs other
+  than XER, LR, CTR and SPEFSCR are global state of the core, so the decompiler shows them as
+  globals (`tbl[PIR & 0xffff]`, `(MSR >> 0xf & 1) != 0`, `SPRG0 = x`) instead of `in_PIR`
+  inputs, and keeps writes to them.
 - `data/patterns/e200_VLE_patterns.xml`: VLE function start patterns (the prologues
   `se_mflr r0; se_stw r0,4(r1)`, `e_stwu r1,-X(r1)`, ... after returns, branches, padding
   or erased flash), used instead of Ghidra's classic PowerPC patterns, which VLE code does

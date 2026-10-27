@@ -23,8 +23,17 @@
       <entry size="8" alignment="8"/>
     </size_alignment_map>
   </data_organization>
+  <!-- MSR and the special purpose registers are state of the core, not of a function:
+       the decompiler shows them as globals (PIR, SPRG0, MSR) instead of in_PIR inputs,
+       and keeps writes to them. Not XER, LR and CTR, which hold values within and between
+       functions, and not SPEFSCR, which the LSP instructions update on every saturation. -->
   <global>
     <range space="ram"/>
+    <range space="register" first="0x700" last="0x703"/>    <!-- MSR -->
+    <range space="register" first="0x1000" last="0x1003"/>  <!-- SPR 0 -->
+    <range space="register" first="0x1008" last="0x101f"/>  <!-- SPR 2-7 -->
+    <range space="register" first="0x1028" last="0x17ff"/>  <!-- SPR 10-511 -->
+    <range space="register" first="0x1804" last="0x1fff"/>  <!-- SPR 513-1023 -->
   </global>
   <stackpointer register="r1" space="ram"/>
   <returnaddress>
