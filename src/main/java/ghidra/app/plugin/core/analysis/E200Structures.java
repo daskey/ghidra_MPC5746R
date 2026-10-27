@@ -31,7 +31,8 @@ import ghidra.program.model.pcode.*;
  * decompiler does not know. The shape of a pointer value is what code does with it: the
  * fields it loads and stores at each offset, with their sizes and types, and for a field
  * that is itself a pointer the shape of what it points to. Indexing it with a stride, as in
- * {@code param_1 + i * 0x14}, makes it a pointer to elements of that size.
+ * {@code param_1 + i * 0x14}, makes it a pointer to elements of that size; indexing it with
+ * several, as a lookup table whose element type a field selects, makes it a {@code void *}.
  * <p>
  * The shapes of the values of linked places (parameters, return values and globals that the
  * same values pass through, see {@link E200TypeFlow}) are merged. A group whose shape has a
@@ -57,10 +58,14 @@ final class E200Structures {
 	private E200Structures() {
 	}
 
-	/** What code does with a pointer: fields at constant offsets, and a stride if indexed */
+	/**
+	 * What code does with a pointer: fields at constant offsets, a stride if indexed, and
+	 * whether it is indexed with several strides, as data whose type is chosen at run time
+	 */
 	static final class Shape {
 		final TreeMap<Long, Field> fields = new TreeMap<>();
 		long stride;
+		boolean mixed;
 
 		boolean isEmpty() {
 			return fields.isEmpty() && stride == 0;
@@ -77,14 +82,18 @@ final class E200Structures {
 				f.types.addAll(e.getValue().types);
 				f.target.merge(e.getValue().target);
 			}
+			mixed |= other.mixed || stride != 0 && other.stride != 0 && stride != other.stride;
 			stride = Math.max(stride, other.stride);
 		}
 
 		/**
 		 * Whether the pointer points to a structure: fields other than one at offset 0, and
-		 * not only bytes from offset 0 on, as code accesses a buffer
+		 * not only bytes from offset 0 on, as code accesses a buffer, and one stride
 		 */
 		boolean structure() {
+			if (mixed) {
+				return false;
+			}
 			if (fields.size() == 1) {
 				return fields.firstKey() != 0 || stride > size(fields.firstEntry().getValue());
 			}
@@ -240,6 +249,7 @@ final class E200Structures {
 		if (stride <= 1 || stride > MAX_OFFSET) {
 			return; // bytes, as in a buffer
 		}
+		shape.mixed |= shape.stride != 0 && shape.stride != stride;
 		shape.stride = shape.stride == 0 ? stride : Math.max(shape.stride, stride);
 		walk(element, 0, shape, seen, depth);
 	}
@@ -289,7 +299,11 @@ final class E200Structures {
 			}
 			DataType type = null;
 			if (size == 4 && !f.target.isEmpty() && depth < MAX_DEPTH) {
-				if (f.target.structure()) {
+				if (f.target.mixed) {
+					// elements of a type chosen at run time
+					type = new PointerDataType(VoidDataType.dataType, 4, manager);
+				}
+				else if (f.target.structure()) {
 					Structure target = build(manager, f.target,
 						name + "_f" + Long.toHexString(offset), signedChar, depth + 1);
 					type = target == null ? null : new PointerDataType(target, 4, manager);

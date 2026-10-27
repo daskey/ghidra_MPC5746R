@@ -58,9 +58,15 @@ import ghidra.util.task.TaskMonitor;
  * (another size or offset, a structure, an array or code), or another table, and never starts
  * inside data.
  * <p>
+ * Where code indexes one address with several strides, as in {@code a[i]} and
+ * {@code a[2 * i]}, an array of the smallest stride whose elements all the accesses are
+ * wins over a structure of the larger stride.
+ * <p>
  * Fields get the type their accesses agree on, also in later rounds, when the decompiler
  * shows more; with default types, those that remain untyped get the unsigned integer of
- * their size.
+ * their size. A loaded pointer gets the type code casts it to, and a pointer to a primitive
+ * the pointer to a structure the analyzer made that starts with it. The data that pointer
+ * fields point to gets the pointed-to type (see {@link E200DataTypes#targets}).
  */
 final class E200Tables {
 
@@ -144,11 +150,49 @@ final class E200Tables {
 			}
 			HighVariable variable = value.getHigh();
 			DataType type = E200Integers.of(variable);
+			boolean open = !E200TypeFlow.informative(type);
+			if (opcode == PcodeOp.LOAD && (open || type instanceof Pointer)) {
+				DataType cast = castTo(value); // what code takes a loaded pointer for
+				if (cast != null && (open || ownStructurePointer(cast))) {
+					type = cast;
+				}
+			}
 			accesses.add(main == null ? new Access(address, size, type, 0, 0, 0)
 					: new Access(address, size, type, main.scale(),
 						inner == main.scale() ? 0 : inner, bound(main.index())));
 		}
 		return accesses;
+	}
+
+	/**
+	 * The pointer type that the uses of a loaded untyped value cast it to, as in
+	 * {@code (float *)tbl[i].f4} or a call's {@code (S *)} parameter, if they agree
+	 */
+	private static DataType castTo(Varnode value) {
+		DataType type = null;
+		Iterator<PcodeOp> uses = value.getDescendants();
+		while (uses.hasNext()) {
+			PcodeOp op = uses.next();
+			if (op.getOpcode() != PcodeOp.CAST || op.getOutput().getHigh() == null) {
+				continue;
+			}
+			DataType t = op.getOutput().getHigh().getDataType();
+			if (!(t instanceof Pointer) || !E200TypeFlow.informative(t) ||
+				t.getLength() != value.getSize()) {
+				continue;
+			}
+			if (type != null && !type.isEquivalent(t)) {
+				return null;
+			}
+			type = t;
+		}
+		return type;
+	}
+
+	/** Whether a type is a pointer to a structure the analyzer created */
+	static boolean ownStructurePointer(DataType type) {
+		return type instanceof Pointer p && p.getDataType() instanceof Structure s &&
+			s.getCategoryPath().equals(CATEGORY);
 	}
 
 	/** An address as a constant (modulo the address size) plus indexes times their strides */
@@ -350,7 +394,8 @@ final class E200Tables {
 		for (Map.Entry<Table, TreeMap<Long, List<DataType>>> e : fieldTypes.entrySet()) {
 			monitor.checkCancelled();
 			for (Map.Entry<Long, List<DataType>> f : e.getValue().entrySet()) {
-				DataType type = E200DataTypes.chooseType(f.getValue(), signedChar, true);
+				DataType type = E200DataTypes.chooseType(pointerTypes(f.getValue()), signedChar,
+					true);
 				if (type != null && retype(e.getKey(), f.getKey(), type)) {
 					changed.add(e.getKey().start().add(f.getKey()));
 				}
@@ -417,12 +462,77 @@ final class E200Tables {
 	}
 
 	/**
-	 * Gives the field at {@code offset} of a table's elements {@code type} if it is undefined
-	 * and of that size (or its elements if the field is an array); returns whether it did.
+	 * The types of a field's accesses that say most about a pointer: pointers to a structure
+	 * the analyzer created rather than to what it starts with, and pointers to a type rather
+	 * than to undefined, as code casts a loaded {@code undefined *} where it knows more
+	 */
+	private static List<DataType> pointerTypes(List<DataType> types) {
+		List<DataType> structures = new ArrayList<>();
+		List<DataType> typed = new ArrayList<>();
+		for (DataType t : types) {
+			if (ownStructurePointer(t)) {
+				structures.add(t);
+			}
+			if (!(t instanceof Pointer) || E200TypeFlow.informative(t)) {
+				typed.add(t);
+			}
+		}
+		if (!structures.isEmpty()) {
+			return structures;
+		}
+		return typed.size() < types.size() &&
+			typed.stream().anyMatch(t -> t instanceof Pointer) ? typed : types;
+	}
+
+	/**
+	 * Whether {@code type} says more than a field's {@code current} type: undefined, a pointer
+	 * to undefined, or a pointer to what a structure the analyzer created starts with, which
+	 * {@code type} points to
+	 */
+	private static boolean refines(DataType current, DataType type) {
+		if (Undefined.isUndefined(current)) {
+			return true;
+		}
+		if (!(current instanceof Pointer p) || !(type instanceof Pointer q) ||
+			!E200TypeFlow.informative(type)) {
+			return false;
+		}
+		if (!E200TypeFlow.informative(current)) {
+			return true;
+		}
+		DataType target = p.getDataType();
+		if (target instanceof Composite || !(q.getDataType() instanceof Structure s) ||
+			!s.getCategoryPath().equals(CATEGORY)) {
+			return false;
+		}
+		DataTypeComponent first = s.getComponentAt(0);
+		return first != null && !(first.getDataType() instanceof DefaultDataType) &&
+			first.getLength() == target.getLength();
+	}
+
+	/**
+	 * Whether an address is in a table whose field there has no type or points to undefined,
+	 * which the decompiled code may show more of
+	 */
+	boolean openField(Address address) {
+		Table table = tableContaining(address);
+		if (table == null) {
+			return false;
+		}
+		DataType type =
+			fieldType(table, address.subtract(table.start()) % table.stride());
+		return type != null && (Undefined.isUndefined(type) ||
+			type instanceof Pointer && !E200TypeFlow.informative(type));
+	}
+
+	/**
+	 * Gives the field at {@code offset} of a table's elements {@code type} if that says more
+	 * (see {@link #refines}) and has its size (or its elements if the field is an array);
+	 * returns whether it did.
 	 */
 	private boolean retype(Table table, long offset, DataType type) {
 		DataType current = fieldType(table, offset);
-		if (current == null || !Undefined.isUndefined(current) ||
+		if (current == null || !refines(current, type) ||
 			current.getLength() != type.getLength()) {
 			return false;
 		}
@@ -434,6 +544,7 @@ final class E200Tables {
 					: type;
 			structure.replaceAtOffset((int) offset, replacement, replacement.getLength(),
 				c.getFieldName(), null);
+			E200DataTypes.targets(program, listing.getDataAt(table.start()), 0);
 			return true;
 		}
 		Data data = listing.getDataAt(table.start());
@@ -442,8 +553,8 @@ final class E200Tables {
 				: type;
 		try {
 			listing.clearCodeUnits(table.start(), data.getMaxAddress(), false);
-			listing.createData(table.start(),
-				new ArrayDataType(element, table.count(), (int) table.stride()));
+			E200DataTypes.targets(program, listing.createData(table.start(),
+				new ArrayDataType(element, table.count(), (int) table.stride())), 0);
 			return true;
 		}
 		catch (CodeUnitInsertionException e) {
@@ -480,10 +591,11 @@ final class E200Tables {
 		for (Cluster c : clusters) {
 			starts.add(c.start);
 		}
+		Set<Cluster> covered = covered(clusters);
 		int created = 0;
 		for (Cluster c : clusters) {
 			monitor.checkCancelled();
-			if (tableContaining(c.start) != null) {
+			if (covered.contains(c) || tableContaining(c.start) != null) {
 				continue;
 			}
 			Table table = c.create(starts, direct);
@@ -498,12 +610,45 @@ final class E200Tables {
 		return created;
 	}
 
+	/**
+	 * The clusters that an array of a single type at the same start covers: code that indexes
+	 * one place with several strides, as in {@code a[i]} and {@code a[2 * i]}, accesses an
+	 * array of the smallest stride when all the accesses are its elements, not a structure of
+	 * the larger one. The covering array takes over their bounds.
+	 */
+	private static Set<Cluster> covered(List<Cluster> clusters) {
+		Set<Cluster> covered = new HashSet<>();
+		Map<Address, List<Cluster>> byStart = new HashMap<>();
+		for (Cluster c : clusters) {
+			byStart.computeIfAbsent(c.start, a -> new ArrayList<>()).add(c);
+		}
+		for (List<Cluster> group : byStart.values()) {
+			Cluster fine = null;
+			for (Cluster c : group) {
+				if (c.elementsOf(c.stride) && (fine == null || c.stride < fine.stride)) {
+					fine = c;
+				}
+			}
+			for (Cluster c : group) {
+				if (fine != null && c != fine && c.stride % fine.stride == 0 &&
+					c.elementsOf(fine.stride)) {
+					covered.add(c);
+					fine.coveredBound = Math.max(fine.coveredBound,
+						(int) Math.min(MAX_ELEMENTS, c.bound() * (c.stride / fine.stride)));
+				}
+			}
+		}
+		return covered;
+	}
+
 	/** The accesses of one table, by the offset of their field in the element */
 	private final class Cluster {
 		final Address start;
 		final long stride;
 		final TreeMap<Long, List<Access>> fields = new TreeMap<>();
 		final List<Long> layoutOffsets = new ArrayList<>();
+		/** The bound of the clusters this one covers, in its elements */
+		int coveredBound;
 
 		Cluster(Address start, long stride) {
 			this.start = start;
@@ -521,12 +666,7 @@ final class E200Tables {
 				!existing.getAddress().equals(start))) {
 				return null; // an array or structure already, or inside other data
 			}
-			int bound = 0;
-			for (List<Access> list : fields.values()) {
-				for (Access a : list) {
-					bound = Math.max(bound, a.bound());
-				}
-			}
+			int bound = Math.max(bound(), coveredBound);
 			TreeMap<Long, DataType> layout = layout();
 			if (layout == null) {
 				return null;
@@ -555,8 +695,9 @@ final class E200Tables {
 			Address end = start.add(count * stride - 1);
 			try {
 				listing.clearCodeUnits(start, end, false);
-				listing.createData(start, new ArrayDataType(element, count, (int) stride,
-					program.getDataTypeManager()));
+				E200DataTypes.targets(program, listing.createData(start,
+					new ArrayDataType(element, count, (int) stride, program.getDataTypeManager())),
+					0);
 			}
 			catch (CodeUnitInsertionException e) {
 				Msg.warn(E200Analyzer.class, "Could not create a table at " + start + ": " + e);
@@ -567,6 +708,35 @@ final class E200Tables {
 			}
 			layoutOffsets.addAll(layout.keySet());
 			return new Table(start, stride, count);
+		}
+
+		/** The number of elements the code allows, the largest over the accesses, or 0 */
+		int bound() {
+			int bound = 0;
+			for (List<Access> list : fields.values()) {
+				for (Access a : list) {
+					bound = Math.max(bound, a.bound());
+				}
+			}
+			return bound;
+		}
+
+		/**
+		 * Whether all the accesses are of {@code size} bytes at multiples of it, with no
+		 * second index: elements of an array of that stride
+		 */
+		boolean elementsOf(long size) {
+			for (Map.Entry<Long, List<Access>> e : fields.entrySet()) {
+				if (e.getKey() % size != 0) {
+					return false;
+				}
+				for (Access a : e.getValue()) {
+					if (a.size() != size || a.inner() != 0) {
+						return false;
+					}
+				}
+			}
+			return true;
 		}
 
 		/** Labels the table tbl_ADDRESS, unless it has a name already */
@@ -631,7 +801,7 @@ final class E200Tables {
 				}
 			}
 			DataType type = types.isEmpty() || untyped ? null
-					: E200DataTypes.chooseType(types, signedChar, true);
+					: E200DataTypes.chooseType(pointerTypes(types), signedChar, true);
 			return type != null && type.getLength() == size ? type
 					: Undefined.getUndefinedDataType(size);
 		}

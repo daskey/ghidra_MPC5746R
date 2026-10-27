@@ -98,6 +98,10 @@ final class E200TypeFlow {
 		final List<Map.Entry<Slot, E200Structures.Shape>> shapes = new ArrayList<>();
 		/** The function, if the decompiler sees no value returned by it */
 		Address returnsNothing;
+		/** The function, if its return type is not known yet (not set by Parameter ID) */
+		Address returnUnknown;
+		/** The functions whose results this one reads after calling them */
+		final Set<Address> resultsRead = new HashSet<>();
 
 		void type(Slot slot, DataType type) {
 			if (type != null) {
@@ -136,6 +140,9 @@ final class E200TypeFlow {
 		}
 		else if (!(returned instanceof DefaultDataType)) {
 			facts.type(new Return(entry), returned);
+		}
+		if (function.getReturnType() instanceof DefaultDataType) {
+			facts.returnUnknown = entry; // Parameter ID did not decide
 		}
 		LocalSymbolMap locals = high.getLocalSymbolMap();
 		for (int i = 0; i < locals.getNumParams(); i++) {
@@ -178,6 +185,7 @@ final class E200TypeFlow {
 						}
 					}
 					if (op.getOutput() != null) {
+						facts.resultsRead.add(target);
 						facts.type(new Return(target), type(op.getOutput()));
 						facts.signs.merge(new Return(target),
 							E200Integers.evidence(op.getOutput().getHigh()), Integer::sum);
@@ -336,10 +344,16 @@ final class E200TypeFlow {
 		globalTypes.forEach((a, types) -> seen.computeIfAbsent(new Global(a),
 			s -> new ArrayList<>()).addAll(types));
 		Set<Address> noReturns = new HashSet<>();
+		Set<Address> unknownReturns = new HashSet<>();
+		Set<Address> read = new HashSet<>();
 		for (Facts f : facts) {
 			if (f.returnsNothing != null) {
 				noReturns.add(f.returnsNothing);
 			}
+			if (f.returnUnknown != null) {
+				unknownReturns.add(f.returnUnknown);
+			}
+			read.addAll(f.resultsRead);
 			for (Map.Entry<Slot, DataType> t : f.types) {
 				seen.computeIfAbsent(t.getKey(), s -> new ArrayList<>()).add(t.getValue());
 			}
@@ -347,6 +361,11 @@ final class E200TypeFlow {
 				union(parent, c.getKey(), c.getValue());
 			}
 		}
+		// return values not known yet that no decompiled caller reads, as of functions called
+		// only through pointers: a value they pass on says nothing about them
+		unknownReturns.removeAll(read);
+		Set<Address> untypedReturns = new HashSet<>(noReturns);
+		untypedReturns.addAll(unknownReturns);
 		Set<Slot> slots = new HashSet<>(seen.keySet());
 		slots.addAll(parent.keySet());
 		slots.addAll(parent.values());
@@ -389,14 +408,14 @@ final class E200TypeFlow {
 				continue;
 			}
 			for (Slot s : group) {
-				if (setPointer(program, s, pointer, globals, complete, noReturns)) {
+				if (setPointer(program, s, pointer, globals, complete, untypedReturns)) {
 					typed.fromValues().add(s);
 				}
 			}
 		}
 		for (Slot s : slots) {
 			monitor.checkCancelled();
-			if (s instanceof Return r && noReturns.contains(r.function())) {
+			if (s instanceof Return r && untypedReturns.contains(r.function())) {
 				continue;
 			}
 			List<DataType> group = groups.get(find(parent, s));
@@ -413,14 +432,15 @@ final class E200TypeFlow {
 				type = defaultType(current(program, s), group);
 				list = typed.byDefault();
 			}
-			if (type != null && set(program, s, type, globals, complete, noReturns)) {
+			if (type != null && set(program, s, type, globals, complete, untypedReturns)) {
 				list.add(s);
 			}
 		}
 		if (defaults) {
 			// Decompiler Parameter ID leaves the return type of a function that returns
-			// nothing undefined, since it does not know whether a caller uses a result
-			for (Address entry : noReturns) {
+			// nothing undefined, since it does not know whether a caller uses a result; a
+			// function whose undefined result no decompiled caller reads returns nothing too
+			for (Address entry : untypedReturns) {
 				Slot r = new Return(entry);
 				if (set(program, r, VoidDataType.dataType, globals, complete, noReturns)) {
 					typed.voids().add(r);
@@ -439,7 +459,7 @@ final class E200TypeFlow {
 			if (e.getValue()[0] > 2 || current == null || current.getLength() != 4 ||
 				current instanceof TypeDef ||
 				!E200Integers.integer(current) && !Undefined.isUndefined(current) ||
-				s instanceof Return r && noReturns.contains(r.function())) {
+				s instanceof Return r && untypedReturns.contains(r.function())) {
 				continue;
 			}
 			narrowed.add(s);
@@ -458,7 +478,8 @@ final class E200TypeFlow {
 			monitor.checkCancelled();
 			DataType current = current(program, s);
 			if (!E200Integers.integer(current) || current instanceof TypeDef ||
-				narrowed.contains(s) || s instanceof Return r && noReturns.contains(r.function())) {
+				narrowed.contains(s) ||
+				s instanceof Return r && untypedReturns.contains(r.function())) {
 				continue;
 			}
 			DataType type =

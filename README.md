@@ -167,9 +167,16 @@ decompiles every function and is the longest part of the analysis):
   (`i < 8`, not `i != 0xff`) and masks (`i & 7`); without one, a table reaches the next
   element that code accesses or that a pointer in memory points to, within 512 bytes (an
   array of structures keeps one element if there is none). A table never takes in an access
-  or data that does not fit its elements, code, or another table. Fields are typed from
-  their uses like globals, in every round. Addresses used as pointers to a type get data of
-  that type, as in `FUN_08faf3e0(&SHORT_09294ba0, x)`.
+  or data that does not fit its elements, code, or another table. Where code indexes one
+  address with several strides, as in `a[i]` and `a[2 * i]`, an array of the smallest
+  stride whose elements all the accesses are wins over a structure of the larger one.
+  Fields are typed from their uses like globals, in every round. A pointer field gets the
+  type code casts it to, `float *` for `*(float *)tbl[i].f34`, or a pointer to a structure
+  the analyzer made for a parameter it is passed as, and the data it points to gets the
+  pointed-to type: Ghidra's reference analysis would otherwise take an undefined target for
+  a pointer if its value is an address, as the float 2.0 (0x40000000, the start of SRAM)
+  is, or for code. Addresses used as pointers to a type get data of that type, as in
+  `FUN_08faf3e0(&SHORT_09294ba0, x)`.
 - **Values passed between functions**: a function that only stores, passes on or returns a
   value gives it no type, but the value has one where it comes from or goes to. Globals,
   parameters and return values are linked where decompiled code copies a value from one to
@@ -184,11 +191,13 @@ decompiles every function and is the longest part of the analysis):
   global, a parameter (`P_<function>_<index>`) or a return value, and its places that hold
   an integer or a pointer to a single value get a pointer to it, so that the decompiler
   shows `param_1->f8->f0`. A run of bytes from offset 0, as code accesses a buffer, stays a
-  `byte *`, and a group with a place that gets a constant that is no address (an error code
-  passed where other callers pass a pointer) gets no structure. Data that code passes as a
-  pointer to such a structure, as a map descriptor in flash passed to a lookup function, gets
-  the structure where only single values at its fields are there, and the data its pointer
-  fields point to gets the pointed-to type (all of flash is executable in an image, and the
+  `byte *`; a pointer indexed with several strides, as the data of a lookup table whose
+  element type a field selects, is a `void *`; and a group with a place that gets a
+  constant that is no address (an error code passed where other callers pass a pointer)
+  gets no structure. Data that code passes as a pointer to such a structure, as a map
+  descriptor in flash passed to a lookup function, gets the structure where only single
+  values at its fields are there, and the data its pointer fields point to gets the
+  pointed-to type (a byte for a `void *`; all of flash is executable in an image, and the
   reference analysis would disassemble an undefined target): `lookup(&P_50800274_092923ec,
   x)` instead of `lookup((P_50800274 *)&USHORT_092923ec, x)`.
 - **Signedness and width of integers** (`E200Integers.java`): the decompiler infers integer
@@ -202,13 +211,16 @@ decompiles every function and is the longest part of the analysis):
   before every use (`param_1 & 0xff`) is a `byte` or `ushort` (Decompiler Parameter ID gives
   it the register's four bytes), and so is a return value that every caller uses so.
 - New types change the decompiled code of the functions that use them, so the analyzer
-  decompiles again those that still use undefined places, or use a place now typed as a
-  pointer (which shows the data it points to), three rounds at most.
+  decompiles again those that still use undefined places or table fields, or use a place
+  now typed as a pointer (which shows the data it points to), three rounds at most, and
+  after the default types below those that use pointer fields still untyped.
 - **Unsigned types for untyped values** (option): places whose group shows no type at all,
   values that are only copied, compared for equality or accessed in bytes, get the unsigned
   integer of their size, and pointers to undefined data of 1, 2 or 4 bytes a pointer to it,
   unless a linked value is a pointer, a `float` or of another size. Functions that return
-  nothing get the return type `void`, which Decompiler Parameter ID leaves undefined.
+  nothing get the return type `void`, which Decompiler Parameter ID leaves undefined, and so
+  do functions whose undefined result no decompiled caller reads, such as handlers called
+  through a table that leave a callee's result in r3.
 - **Results callers use** (`E200PassedResults.java`): e200 compilers do not turn
   `return g(x);` into a branch to `g`. The function calls `g` and returns with the result of
   `g` still in r3, which Decompiler Parameter ID misses when `g` had no return type yet. A
