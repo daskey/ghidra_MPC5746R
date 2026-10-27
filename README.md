@@ -60,16 +60,19 @@ separate files:
 
 One analyzer, **PowerPC e200** (`E200Analyzer.java`), does all the analysis below and runs
 by default for this language; each step has its options under it in **Analysis Options**.
-It runs on the code that analysis finds, where Ghidra's constant reference analyzers run:
-it finds entry points, assumes the small data area bases and propagates constants. It
-schedules the peripherals, functions and data types steps later in analysis, after
-Decompiler Parameter ID, for the functions it has not handled yet. To apply it to an
-existing program or a selection, run it with **Analysis > One Shot**.
+It runs on the code that analysis finds, where Ghidra's constant reference analyzers run.
+At the start of every analysis, not only the first, it finds the entry points and works
+out the small data area bases, and it propagates constants in the new code and again where
+the bases changed. It schedules the peripherals, functions and data types steps later in
+analysis, after Decompiler Parameter ID, for the functions with new or changed code and
+those it has not seen. Each step leaves what is already marked up as it is, so running
+analysis again, or the analyzer on a selection with **Analysis > One Shot**, redoes only
+what changed.
 
 ### Entry points
 
-`E200EntryPoints.java` finds the entry points of raw flash images, in memory not searched
-before (option **Find boot headers and interrupt vectors**):
+`E200EntryPoints.java` finds the entry points of raw flash images at every analysis (option
+**Find boot headers and interrupt vectors**):
 - **Boot headers** of the MPC57xx boot assist flash (`0x005A....` at the start of a flash
   block or a 16 KB boundary): typed `MPC57xx_boot_header`, with a function `reset` (or
   `reset_0`, `reset_1`, ...) at each core's reset vector.
@@ -79,20 +82,28 @@ before (option **Find boot headers and interrupt vectors**):
 
 ### Small data area bases and constant references
 
+- **Small data area bases** (`E200SmallDataBases.java`). The analyzer assumes the EABI
+  bases r13 (`_SDA_BASE_`) and r2 (`_SDA2_BASE_`) in executable memory, so that
+  `e_lwz r3,-0x7ff0(r13)` resolves to a global. The values come from the linker symbols or
+  from the startup code that loads the registers, found even where analysis does not reach
+  it. When an image holds several programs, such as a bootloader and an application, each
+  value applies to the code its startup code reaches, up to the erased flash before the next
+  program; code copied to local memory gets the values of the program it was copied from.
+  They are worked out at every analysis: the analyzer records the values it sets in the
+  program and replaces them where the symbols, the startup code or the memory changed, or
+  where they were removed. Where a value changes, the references that the code using it got
+  from the earlier value are removed and constants are propagated there again. Values the
+  loader or the user set, or that the user changed, are left alone. Option **Assume small
+  data area bases**.
+
 `E200ConstantPropagation.java` is derived from Ghidra's PowerPC Constant Reference
 Analyzer, which the processor spec disables, as it does the Basic one.
-- **Small data area bases.** The analyzer assumes the EABI bases r13 (`_SDA_BASE_`) and r2
-  (`_SDA2_BASE_`) in executable memory, so that `e_lwz r3,-0x7ff0(r13)` resolves to a
-  global. The values come from register values already set (never changed), the linker
-  symbols, or the startup code that loads the registers, found even where analysis does
-  not reach it. When an image holds several programs, such as a bootloader and an
-  application, each value applies to the code its startup code reaches, up to the erased
-  flash before the next program; code copied to local memory gets the values of the
-  program it was copied from. Option **Assume small data area bases**.
 - **VLE instructions.** No references from `e_lis`, which holds only the upper half of an
   address, or from constants loaded with `e_li`, `se_li`, `se_bgeni` and `se_bmaski`.
 - **Switch tables** behind `se_bctr`, bounded by VLE compares, also in flash images loaded
   into a writable block. Option **Switch Table Recovery**.
+- **Split array addresses.** An array address that code adds around the index, the lower
+  half with `e_add16i` or `e_addi` and the upper half with `e_add2is`, gets a reference.
 
 ### Peripherals
 

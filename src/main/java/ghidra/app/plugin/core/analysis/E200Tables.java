@@ -54,9 +54,9 @@ import ghidra.util.task.TaskMonitor;
  * which marks an index that is not valid). Without one, a table reaches the next element that
  * code accesses or a pointer in memory points to, within 512 bytes; if there is none, an
  * array of structures has one element (for the decompiler to show its fields) and an array
- * of a single type is not created. A table never reaches an access or data that does not fit its elements
- * (another size or offset, a structure, an array or code), or another table, and never starts
- * inside data.
+ * of a single type is not created. A table never reaches an access or data that does not fit
+ * its elements (another size or offset, a structure, an array or code), or another table, and
+ * never starts inside data.
  * <p>
  * Where code indexes one address with several strides, as in {@code a[i]} and
  * {@code a[2 * i]}, an array of the smallest stride whose elements all the accesses are
@@ -189,10 +189,14 @@ final class E200Tables {
 		return type;
 	}
 
+	/** Whether a type is a structure the analyzer created */
+	static boolean ownStructure(DataType type) {
+		return type instanceof Structure s && s.getCategoryPath().equals(CATEGORY);
+	}
+
 	/** Whether a type is a pointer to a structure the analyzer created */
 	static boolean ownStructurePointer(DataType type) {
-		return type instanceof Pointer p && p.getDataType() instanceof Structure s &&
-			s.getCategoryPath().equals(CATEGORY);
+		return type instanceof Pointer p && ownStructure(p.getDataType());
 	}
 
 	/** An address as a constant (modulo the address size) plus indexes times their strides */
@@ -501,11 +505,10 @@ final class E200Tables {
 			return true;
 		}
 		DataType target = p.getDataType();
-		if (target instanceof Composite || !(q.getDataType() instanceof Structure s) ||
-			!s.getCategoryPath().equals(CATEGORY)) {
+		if (target instanceof Composite || !ownStructurePointer(q)) {
 			return false;
 		}
-		DataTypeComponent first = s.getComponentAt(0);
+		DataTypeComponent first = ((Structure) q.getDataType()).getComponentAt(0);
 		return first != null && !(first.getDataType() instanceof DefaultDataType) &&
 			first.getLength() == target.getLength();
 	}

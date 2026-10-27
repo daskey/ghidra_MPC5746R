@@ -85,9 +85,6 @@ final class E200Peripherals {
 	private boolean enabled = true;
 	private boolean bitFields = OPTION_DEFAULT_BIT_FIELDS;
 
-	/** The initialized memory for which the peripherals were last added. */
-	private AddressSetView appliedFor;
-
 	void registerOptions(Options options) {
 		options.registerOption(OPTION_NAME, enabled, null, OPTION_DESCRIPTION);
 		options.registerOption(OPTION_NAME_BIT_FIELDS, bitFields, null,
@@ -100,16 +97,14 @@ final class E200Peripherals {
 	}
 
 	/**
-	 * Adds the peripherals, at the end of analysis (see the class comment), and again when
-	 * memory is added, which may hold tables of base addresses.
+	 * Adds the peripherals that are not there yet, at the end of every analysis (see the class
+	 * comment), and types the tables of their base addresses that are not typed yet.
 	 */
 	boolean apply(Program program, TaskMonitor monitor, MessageLog log)
 			throws CancelledException {
-		AddressSetView memory = program.getMemory().getLoadedAndInitializedAddressSet();
-		if (!enabled || memory.equals(appliedFor)) {
+		if (!enabled) {
 			return true;
 		}
-		appliedFor = memory;
 		SvdDevice svd;
 		try {
 			svd = device();

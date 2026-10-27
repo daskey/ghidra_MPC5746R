@@ -121,8 +121,8 @@ final class E200Integers {
 					w = op.getOutput().getSize();
 					evidence[0] += evidence(op.getOutput().getHigh());
 				}
-				else if (op.getOpcode() == PcodeOp.INDIRECT || op.getOpcode() == PcodeOp.MULTIEQUAL &&
-					op.getOutput().getHigh() == high) {
+				else if ((op.getOpcode() == PcodeOp.INDIRECT ||
+					op.getOpcode() == PcodeOp.MULTIEQUAL) && op.getOutput().getHigh() == high) {
 					continue; // within the variable
 				}
 				width = Math.max(width, w);

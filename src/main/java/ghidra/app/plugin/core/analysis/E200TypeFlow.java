@@ -422,7 +422,8 @@ final class E200TypeFlow {
 			DataType type = E200DataTypes.chooseType(
 				informativeOnly(seen.getOrDefault(s, List.of())), signedChar, false, defaults);
 			if (type == null) {
-				type = E200DataTypes.chooseType(informativeOnly(group), signedChar, false, defaults);
+				type = E200DataTypes.chooseType(informativeOnly(group), signedChar, false,
+					defaults);
 			}
 			List<Slot> list = typed.fromValues();
 			if (type == null) {
@@ -500,7 +501,7 @@ final class E200TypeFlow {
 	private static boolean pointsToComposite(List<DataType> group) {
 		for (DataType t : group) {
 			if (t instanceof Pointer p && p.getDataType() instanceof Composite c &&
-				!c.getCategoryPath().equals(E200Tables.CATEGORY)) {
+				!E200Tables.ownStructure(c)) {
 				return true;
 			}
 		}

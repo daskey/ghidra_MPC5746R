@@ -157,8 +157,9 @@ final class E200DataTypes {
 	}
 
 	/**
-	 * Adds the RAM blocks, at the end of analysis (see the class comment), and types the
-	 * globals, parameters and return values that the functions use.
+	 * Adds the RAM blocks that are not there yet, at the end of every analysis (see the class
+	 * comment), creates data where code accesses RAM that has none, and types the globals,
+	 * parameters and return values that the functions use.
 	 */
 	boolean apply(Program program, Set<Function> analyzed, TaskMonitor monitor)
 			throws CancelledException {
@@ -166,10 +167,8 @@ final class E200DataTypes {
 			return true;
 		}
 		if (addRamBlocksOption) {
-			AddressSetView ram = addRamBlocks(program);
-			if (!ram.isEmpty()) {
-				createAccessedData(program, ram, monitor);
-			}
+			addRamBlocks(program);
+			createAccessedData(program, unmappedRam(program), monitor);
 		}
 		if (analyzed.isEmpty()) {
 			return true;
@@ -353,7 +352,7 @@ final class E200DataTypes {
 				if (!typable.contains(use.address())) {
 					continue;
 				}
-				if (use.access() == Access.ADDRESS && ownStructure(use.type())) {
+				if (use.access() == Access.ADDRESS && E200Tables.ownStructure(use.type())) {
 					Structure s = (Structure) use.type();
 					if (structures.containsKey(use.address()) &&
 						!structures.get(use.address()).isEquivalent(s)) {
@@ -540,11 +539,8 @@ final class E200DataTypes {
 	 * Adds blocks for the parts of the MPC5746R RAM that have nothing mapped, such as the
 	 * space around a dump of part of the RAM. A part is named after its RAM with its start
 	 * address ({@code SRAM_40000000}) unless it is the whole RAM.
-	 *
-	 * @return the address ranges of the added blocks
 	 */
-	private static AddressSetView addRamBlocks(Program program) {
-		AddressSet added = new AddressSet();
+	private static void addRamBlocks(Program program) {
 		List<String> names = new ArrayList<>();
 		Memory memory = program.getMemory();
 		AddressSpace space = program.getAddressFactory().getDefaultAddressSpace();
@@ -559,7 +555,6 @@ final class E200DataTypes {
 						range.getMinAddress(), range.getLength(), false);
 					block.setPermissions(true, true, ram.execute());
 					block.setComment(ram.description() + ", added by " + E200Analyzer.NAME);
-					added.add(range);
 					names.add(name);
 				}
 				catch (LockException | MemoryConflictException | AddressOverflowException e) {
@@ -571,7 +566,23 @@ final class E200DataTypes {
 		if (!names.isEmpty()) {
 			Msg.info(E200Analyzer.class, "Added RAM blocks " + String.join(", ", names));
 		}
-		return added;
+	}
+
+	/** The MPC5746R RAM in uninitialized blocks, as the analyzer adds them */
+	private static AddressSetView unmappedRam(Program program) {
+		AddressSet ram = new AddressSet();
+		AddressSpace space = program.getAddressFactory().getDefaultAddressSpace();
+		for (RamBlock block : RAM_BLOCKS) {
+			ram.add(space.getAddress(block.start()),
+				space.getAddress(block.start() + block.length() - 1));
+		}
+		AddressSet unmapped = new AddressSet();
+		for (MemoryBlock block : program.getMemory().getBlocks()) {
+			if (!block.isInitialized()) {
+				unmapped.add(block.getStart(), block.getEnd());
+			}
+		}
+		return ram.intersect(unmapped);
 	}
 
 	/**
@@ -588,22 +599,15 @@ final class E200DataTypes {
 		while (it.hasNext()) {
 			monitor.checkCancelled();
 			Address addr = it.next();
-			// the most frequent access size, the larger one on a tie
-			Map<Integer, Integer> counts = new HashMap<>();
+			List<Integer> sizes = new ArrayList<>();
 			for (Reference ref : references.getReferencesTo(addr)) {
 				Instruction instr = listing.getInstructionAt(ref.getFromAddress());
 				int size = instr == null ? 0 : accessSize(instr);
 				if (size > 0) {
-					counts.merge(size, 1, Integer::sum);
+					sizes.add(size);
 				}
 			}
-			int size = 0, count = 0;
-			for (Map.Entry<Integer, Integer> e : counts.entrySet()) {
-				if (e.getValue() > count || (e.getValue() == count && e.getKey() > size)) {
-					size = e.getKey();
-					count = e.getValue();
-				}
-			}
+			int size = mostFrequent(sizes);
 			if (size == 0) {
 				continue;
 			}
@@ -617,6 +621,20 @@ final class E200DataTypes {
 				// no room for the access at this address
 			}
 		}
+	}
+
+	/** The most frequent of the sizes, the larger on a tie; 0 if there are none */
+	static int mostFrequent(Collection<Integer> sizes) {
+		Map<Integer, Integer> counts = new HashMap<>();
+		sizes.forEach(size -> counts.merge(size, 1, Integer::sum));
+		int size = 0, count = 0;
+		for (Map.Entry<Integer, Integer> e : counts.entrySet()) {
+			if (e.getValue() > count || e.getValue() == count && e.getKey() > size) {
+				size = e.getKey();
+				count = e.getValue();
+			}
+		}
+		return size;
 	}
 
 	/**
@@ -708,17 +726,7 @@ final class E200DataTypes {
 				functions.getFunctionContaining(base) != null) {
 				continue;
 			}
-			Map<Integer, Integer> counts = new HashMap<>();
-			for (Use use : e.getValue()) {
-				counts.merge(use.size(), 1, Integer::sum);
-			}
-			int size = 0, count = 0;
-			for (Map.Entry<Integer, Integer> c : counts.entrySet()) {
-				if (c.getValue() > count || (c.getValue() == count && c.getKey() > size)) {
-					size = c.getKey();
-					count = c.getValue();
-				}
-			}
+			int size = mostFrequent(e.getValue().stream().map(Use::size).toList());
 			if (size != 1 && size != 2 && size != 4 && size != 8 ||
 				base.getOffset() % size != 0) {
 				continue;
@@ -745,11 +753,6 @@ final class E200DataTypes {
 			}
 		}
 		return created;
-	}
-
-	/** Whether a type is a structure that the analyzer created */
-	private static boolean ownStructure(DataType type) {
-		return type instanceof Structure s && s.getCategoryPath().equals(E200Tables.CATEGORY);
 	}
 
 	/**
@@ -973,16 +976,8 @@ final class E200DataTypes {
 		while (!queue.isEmpty()) {
 			Varnode v = queue.removeFirst();
 			HighVariable hv = v.getHigh();
-			if (hv != null && hv.getDataType() instanceof Pointer p) {
-				DataType target = p.getDataType();
-				if (target != null) {
-					int length = target.getLength();
-					if (ownStructure(target) ||
-						(kind(target) != Kind.OTHER || Undefined.isUndefined(target)) &&
-						(length == 1 || length == 2 || length == 4 || length == 8)) {
-						types.add(target);
-					}
-				}
+			if (hv != null && pointsToValue(hv.getDataType())) {
+				types.add(((Pointer) hv.getDataType()).getDataType());
 			}
 			Iterator<PcodeOp> uses = v.getDescendants();
 			while (uses.hasNext()) {
@@ -996,21 +991,11 @@ final class E200DataTypes {
 				}
 				else if (opcode == PcodeOp.CALL) {
 					Function callee = E200TypeFlow.callee(functions, use);
-					if (callee != null) {
-						for (int i = 1; i < use.getNumInputs(); i++) {
-							if (use.getInput(i) == v && i - 1 < callee.getParameterCount()) {
-								DataType paramType = callee.getParameter(i - 1).getDataType();
-								if (paramType instanceof Pointer p) {
-									DataType target = p.getDataType();
-									if (target != null) {
-										int length = target.getLength();
-										if (ownStructure(target) ||
-											(kind(target) != Kind.OTHER || Undefined.isUndefined(target)) &&
-											(length == 1 || length == 2 || length == 4 || length == 8)) {
-											types.add(target);
-										}
-									}
-								}
+					for (int i = 1; callee != null && i < use.getNumInputs(); i++) {
+						if (use.getInput(i) == v && i - 1 < callee.getParameterCount()) {
+							DataType parameter = callee.getParameter(i - 1).getDataType();
+							if (pointsToValue(parameter)) {
+								types.add(((Pointer) parameter).getDataType());
 							}
 						}
 					}
@@ -1018,6 +1003,21 @@ final class E200DataTypes {
 			}
 		}
 		return types;
+	}
+
+	/**
+	 * Whether a type is a pointer to a number or pointer of 1, 2, 4 or 8 bytes, undefined
+	 * ones included, or to a structure the analyzer created
+	 */
+	private static boolean pointsToValue(DataType type) {
+		if (!(type instanceof Pointer p) || p.getDataType() == null) {
+			return false;
+		}
+		DataType target = p.getDataType();
+		int length = target.getLength();
+		return E200Tables.ownStructure(target) ||
+			(kind(target) != Kind.OTHER || Undefined.isUndefined(target)) &&
+				(length == 1 || length == 2 || length == 4 || length == 8);
 	}
 
 	/**

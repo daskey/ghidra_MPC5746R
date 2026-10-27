@@ -116,18 +116,7 @@ final class E200Structures {
 
 	/** The size most accesses of a field have, the larger on a tie */
 	private static int size(Field f) {
-		Map<Integer, Integer> counts = new HashMap<>();
-		for (int s : f.sizes) {
-			counts.merge(s, 1, Integer::sum);
-		}
-		int size = 0, count = 0;
-		for (Map.Entry<Integer, Integer> e : counts.entrySet()) {
-			if (e.getValue() > count || e.getValue() == count && e.getKey() > size) {
-				size = e.getKey();
-				count = e.getValue();
-			}
-		}
-		return size;
+		return E200DataTypes.mostFrequent(f.sizes);
 	}
 
 	/** Adds the shapes of the parameters, globals and call results of a function to facts. */

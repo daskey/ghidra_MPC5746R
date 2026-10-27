@@ -21,7 +21,7 @@ import ghidra.app.util.PseudoDisassembler;
 import ghidra.framework.options.Options;
 import ghidra.program.model.address.*;
 import ghidra.program.model.data.*;
-import ghidra.program.model.listing.Program;
+import ghidra.program.model.listing.*;
 import ghidra.program.model.mem.*;
 import ghidra.program.model.symbol.*;
 import ghidra.program.model.util.CodeUnitInsertionException;
@@ -32,9 +32,10 @@ import ghidra.util.task.TaskMonitor;
 
 /**
  * Finds the entry points of MPC57xx flash images (part of {@link E200Analyzer}): the reset
- * vectors in boot headers and the interrupt vectors, in memory not searched before. A raw
+ * vectors in boot headers and the interrupt vectors, at the start of every analysis. A raw
  * flash image has no other entry points, and startup code usually reaches the interrupt setup
- * only through values that analysis cannot follow.
+ * only through values that analysis cannot follow. What is marked up already is left as it
+ * is.
  * <ul>
  * <li>Boot headers: the boot assist flash looks for a boot header at the start of flash
  * blocks. Its first word holds the boot identifier 0x5A in bits 8-15 ({@code 0x005A....}),
@@ -85,9 +86,6 @@ final class E200EntryPoints {
 
 	private boolean enabled = true;
 
-	/** The initialized memory searched so far */
-	private AddressSetView searched = new AddressSet();
-
 	void registerOptions(Options options) {
 		options.registerOption(OPTION_NAME, enabled, null, OPTION_DESCRIPTION);
 	}
@@ -96,28 +94,25 @@ final class E200EntryPoints {
 		enabled = options.getBoolean(OPTION_NAME, enabled);
 	}
 
-	/** Finds the entry points in the initialized memory not searched yet. */
+	/** Finds the entry points in initialized memory, and marks up those that are not yet. */
 	void find(Program program, TaskMonitor monitor) throws CancelledException {
-		AddressSetView memory = program.getMemory().getLoadedAndInitializedAddressSet();
-		if (!enabled || memory.equals(searched)) {
+		if (!enabled) {
 			return;
 		}
-		AddressSet set = memory.subtract(searched);
-		searched = memory;
 		for (MemoryBlock block : program.getMemory().getBlocks()) {
 			monitor.checkCancelled();
-			if (block.isInitialized() && set.intersects(block.getStart(), block.getEnd())) {
-				findBootHeaders(program, block, set);
+			if (block.isInitialized()) {
+				findBootHeaders(program, block);
 			}
 		}
-		for (AddressRange range : E200Analyzer.executableMemory(program).intersect(set)) {
+		for (AddressRange range : E200Analyzer.executableMemory(program)) {
 			findVectorTables(program, range, monitor);
 		}
 	}
 
 	// ---- Boot headers -----------------------------------------------------------------------
 
-	private void findBootHeaders(Program program, MemoryBlock block, AddressSetView set) {
+	private void findBootHeaders(Program program, MemoryBlock block) {
 		if (block.getSize() < HEADER_SIZE) {
 			return;
 		}
@@ -129,7 +124,7 @@ final class E200EntryPoints {
 			candidates.add(block.getStart().getNewAddress(offset));
 		}
 		for (Address header : candidates) {
-			if (header.compareTo(last) <= 0 && set.contains(header)) {
+			if (header.compareTo(last) <= 0) {
 				markBootHeader(program, header);
 			}
 		}
@@ -157,19 +152,22 @@ final class E200EntryPoints {
 			return;
 		}
 
-		try {
-			program.getListing().createData(header, bootHeaderType(program));
-		}
-		catch (CodeUnitInsertionException e) {
-			// something is already defined there
+		if (program.getListing().isUndefined(header, header.add(HEADER_SIZE - 1))) {
+			try {
+				program.getListing().createData(header, bootHeaderType(program));
+			}
+			catch (CodeUnitInsertionException e) {
+				// something is already defined there
+			}
 		}
 		label(program, header, "boot_header");
 
 		AutoAnalysisManager manager = AutoAnalysisManager.getAnalysisManager(program);
 		for (int i = 0; i < VECTOR_COUNT; i++) {
 			Address vector = vectors.get(i);
-			if (vector == null || vectors.indexOf(vector) != i) {
-				continue; // no vector, or the same as an earlier core's
+			if (vector == null || vectors.indexOf(vector) != i ||
+				program.getFunctionManager().getFunctionAt(vector) != null) {
+				continue; // no vector, the same as an earlier core's, or marked up already
 			}
 			label(program, vector, distinct.size() == 1 ? "reset" : "reset_" + i);
 			program.getSymbolTable().addExternalEntryPoint(vector);
@@ -264,18 +262,28 @@ final class E200EntryPoints {
 
 	private void markVectorTable(Program program, Address table, List<Address> handlers) {
 		AutoAnalysisManager manager = AutoAnalysisManager.getAnalysisManager(program);
+		Listing listing = program.getListing();
+		FunctionManager functions = program.getFunctionManager();
 		Address tableEnd = table.add(handlers.size() * VECTOR_SPACING - 1);
+		boolean marked = false;
 		for (int i = 0; i < handlers.size(); i++) {
 			Address vector = table.add(i * VECTOR_SPACING);
 			label(program, vector, IVORS[i]);
-			manager.disassemble(vector);
+			if (listing.getInstructionAt(vector) == null) {
+				manager.disassemble(vector);
+				marked = true;
+			}
 			Address handler = handlers.get(i);
-			if (handler.compareTo(table) < 0 || handler.compareTo(tableEnd) > 0) {
+			if ((handler.compareTo(table) < 0 || handler.compareTo(tableEnd) > 0) &&
+				functions.getFunctionAt(handler) == null) {
 				manager.createFunction(handler, false);
+				marked = true;
 			}
 		}
-		Msg.info(E200Analyzer.class, "Interrupt vector table at " + table + ": " + handlers.size() +
-			" vectors");
+		if (marked) {
+			Msg.info(E200Analyzer.class, "Interrupt vector table at " + table + ": " +
+				handlers.size() + " vectors");
+		}
 	}
 
 	private static void label(Program program, Address address, String name) {
