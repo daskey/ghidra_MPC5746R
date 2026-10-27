@@ -41,7 +41,8 @@ import ghidra.program.model.pcode.*;
  * A parameter of one or two bytes arrives in a register that the callee masks or truncates
  * before every use ({@code e_rlwinm r0,r3,0,24,31}), and Decompiler Parameter ID gives it the
  * register's four bytes: the decompiler shows {@code param_1 & 0xff} at each use, and casts
- * at each call. A parameter all of whose uses are such is one or two bytes wide.
+ * at each call. A parameter all of whose uses are such is one or two bytes wide, and so is a
+ * return value that every caller uses so.
  */
 final class E200Integers {
 
@@ -98,8 +99,8 @@ final class E200Integers {
 
 	/**
 	 * The width in bytes that the uses of a value of four bytes show: 1 or 2 if every use
-	 * masks it with 0xff or 0xffff or truncates it to that width, else 4; and through
-	 * {@code evidence} the signedness evidence of the narrowed values
+	 * masks it with 0xff or 0xffff or truncates it to that width, 0 if it has no use, else 4;
+	 * and through {@code evidence} the signedness evidence of the narrowed values
 	 */
 	static int width(HighVariable high, int[] evidence) {
 		if (high == null || high.getSize() != 4) {
@@ -127,7 +128,7 @@ final class E200Integers {
 				width = Math.max(width, w);
 			}
 		}
-		return width == 0 ? 4 : width;
+		return width;
 	}
 
 	/** The type the decompiler gives a value, an integer with the signedness its uses show */

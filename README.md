@@ -200,7 +200,7 @@ decompiles every function and is the longest part of the analysis):
   value without either is unsigned. Integers that analysis typed get the signedness of the
   uses of their group. A parameter that the callee masks or truncates to one or two bytes
   before every use (`param_1 & 0xff`) is a `byte` or `ushort` (Decompiler Parameter ID gives
-  it the register's four bytes).
+  it the register's four bytes), and so is a return value that every caller uses so.
 - New types change the decompiled code of the functions that use them, so the analyzer
   decompiles again those that still use undefined places, or use a place now typed as a
   pointer (which shows the data it points to), three rounds at most.

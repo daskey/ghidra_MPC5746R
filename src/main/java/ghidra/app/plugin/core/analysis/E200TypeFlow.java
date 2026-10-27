@@ -87,8 +87,9 @@ final class E200TypeFlow {
 		/** How the uses of the values of places show their signedness */
 		final Map<Slot, Integer> signs = new HashMap<>();
 		/**
-		 * The parameters that the function only uses masked or truncated to 1 or 2 bytes:
-		 * that width, and the signedness evidence of the narrowed values
+		 * The width that the uses of parameters and of the results of calls show (1 or 2 if
+		 * they are only used masked or truncated to it, else 4), and the signedness evidence of
+		 * the narrowed values
 		 */
 		final Map<Slot, int[]> widths = new HashMap<>();
 		/** The places that get a constant that is no address in memory: not only pointers */
@@ -146,8 +147,9 @@ final class E200TypeFlow {
 				facts.signs.merge(slot, E200Integers.evidence(variable), Integer::sum);
 				int[] narrowed = new int[1];
 				int width = E200Integers.width(variable, narrowed);
-				if (width < 4) {
-					facts.widths.put(slot, new int[] { width, narrowed[0] });
+				if (width > 0) {
+					facts.widths.merge(slot, new int[] { width, narrowed[0] },
+						E200TypeFlow::widest);
 				}
 			}
 		}
@@ -179,6 +181,12 @@ final class E200TypeFlow {
 						facts.type(new Return(target), type(op.getOutput()));
 						facts.signs.merge(new Return(target),
 							E200Integers.evidence(op.getOutput().getHigh()), Integer::sum);
+						int[] narrowed = new int[1];
+						int width = E200Integers.width(op.getOutput().getHigh(), narrowed);
+						if (width > 0) {
+							facts.widths.merge(new Return(target),
+								new int[] { width, narrowed[0] }, E200TypeFlow::widest);
+						}
 						Slot global = global(op.getOutput()); // the result goes to a global
 						if (global != null) {
 							facts.copies.add(Map.entry(global, new Return(target)));
@@ -419,22 +427,26 @@ final class E200TypeFlow {
 				}
 			}
 		}
-		// parameters of one or two bytes that arrive in a register of four
-		Set<Slot> narrowed = new HashSet<>();
+		// parameters and return values of one or two bytes in a register of four
+		Map<Slot, int[]> widths = new HashMap<>();
 		for (Facts f : facts) {
-			for (Map.Entry<Slot, int[]> e : f.widths.entrySet()) {
-				Slot s = e.getKey();
-				DataType current = current(program, s);
-				if (current == null || current.getLength() != 4 || current instanceof TypeDef ||
-					!E200Integers.integer(current) && !Undefined.isUndefined(current)) {
-					continue;
-				}
-				narrowed.add(s);
-				DataType type = E200Integers.withSign(E200DataTypes.unsigned(e.getValue()[0]),
-					e.getValue()[1]);
-				if (setInteger(program, s, type, globals, complete)) {
-					typed.fromValues().add(s);
-				}
+			f.widths.forEach((s, w) -> widths.merge(s, w, E200TypeFlow::widest));
+		}
+		Set<Slot> narrowed = new HashSet<>();
+		for (Map.Entry<Slot, int[]> e : widths.entrySet()) {
+			Slot s = e.getKey();
+			DataType current = current(program, s);
+			if (e.getValue()[0] > 2 || current == null || current.getLength() != 4 ||
+				current instanceof TypeDef ||
+				!E200Integers.integer(current) && !Undefined.isUndefined(current) ||
+				s instanceof Return r && noReturns.contains(r.function())) {
+				continue;
+			}
+			narrowed.add(s);
+			DataType type = E200Integers.withSign(E200DataTypes.unsigned(e.getValue()[0]),
+				e.getValue()[1]);
+			if (setInteger(program, s, type, globals, complete)) {
+				typed.fromValues().add(s);
 			}
 		}
 		// the signedness of the integers analysis typed, from the uses of their group
@@ -456,6 +468,11 @@ final class E200TypeFlow {
 			}
 		}
 		return typed;
+	}
+
+	/** The wider of two widths, with the signedness evidence of both */
+	private static int[] widest(int[] a, int[] b) {
+		return new int[] { Math.max(a[0], b[0]), a[1] + b[1] };
 	}
 
 	/** Whether a group has a pointer to a structure, union or array of its own */
