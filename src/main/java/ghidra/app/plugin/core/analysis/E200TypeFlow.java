@@ -22,6 +22,7 @@ import ghidra.program.model.data.*;
 import ghidra.program.model.listing.*;
 import ghidra.program.model.pcode.*;
 import ghidra.program.model.symbol.SourceType;
+import ghidra.program.model.util.CodeUnitInsertionException;
 import ghidra.util.Msg;
 import ghidra.util.exception.CancelledException;
 import ghidra.util.exception.InvalidInputException;
@@ -44,6 +45,10 @@ import ghidra.util.task.TaskMonitor;
  * on, the same rules as for globals but without letting a {@code float} win over integers,
  * and the places of undefined type in the group get it where it fits: the same size, or a
  * pointer to a type of the size a pointer parameter's undefined target has.
+ * <p>
+ * Before that, a group whose values code uses as pointers to a structure, reading or writing
+ * at constant offsets, gets a pointer to a structure of the fields it accesses (see
+ * {@link E200Structures}).
  * <p>
  * Optionally, places whose group shows no type at all then get the unsigned integer of their
  * size ({@code byte}, {@code ushort}, {@code uint}), and pointers to undefined data of 1, 2
@@ -79,6 +84,8 @@ final class E200TypeFlow {
 	static final class Facts {
 		final List<Map.Entry<Slot, DataType>> types = new ArrayList<>();
 		final List<Map.Entry<Slot, Slot>> copies = new ArrayList<>();
+		/** What code does with the values of places used as pointers */
+		final List<Map.Entry<Slot, E200Structures.Shape>> shapes = new ArrayList<>();
 		/** The function, if the decompiler sees no value returned by it */
 		Address returnsNothing;
 
@@ -175,6 +182,7 @@ final class E200TypeFlow {
 				}
 			}
 		}
+		E200Structures.collect(high, facts);
 		return facts;
 	}
 
@@ -306,13 +314,40 @@ final class E200TypeFlow {
 		Set<Slot> slots = new HashSet<>(seen.keySet());
 		slots.addAll(parent.keySet());
 		slots.addAll(parent.values());
+		Map<Slot, E200Structures.Shape> shapes = new HashMap<>(); // by group
+		for (Facts f : facts) {
+			for (Map.Entry<Slot, E200Structures.Shape> e : f.shapes) {
+				slots.add(e.getKey());
+				shapes.computeIfAbsent(find(parent, e.getKey()), r -> new E200Structures.Shape())
+						.merge(e.getValue());
+			}
+		}
 		Map<Slot, List<DataType>> groups = new HashMap<>();
+		Map<Slot, List<Slot>> members = new HashMap<>();
 		for (Slot s : slots) {
 			groups.computeIfAbsent(find(parent, s), r -> new ArrayList<>())
 					.addAll(seen.getOrDefault(s, List.of()));
+			members.computeIfAbsent(find(parent, s), r -> new ArrayList<>()).add(s);
 		}
 		boolean signedChar = program.getDataTypeManager().getDataOrganization().isSignedChar();
 		Typed typed = new Typed(new ArrayList<>(), new ArrayList<>(), new ArrayList<>());
+		// pointers to structures, before the types of single values
+		for (Map.Entry<Slot, E200Structures.Shape> e : shapes.entrySet()) {
+			monitor.checkCancelled();
+			if (!e.getValue().structure() || pointsToComposite(groups.get(e.getKey()))) {
+				continue;
+			}
+			List<Slot> group = members.get(e.getKey());
+			Pointer pointer = structurePointer(program, group, e.getValue(), signedChar);
+			if (pointer == null) {
+				continue;
+			}
+			for (Slot s : group) {
+				if (setPointer(program, s, pointer, globals, complete, noReturns)) {
+					typed.fromValues().add(s);
+				}
+			}
+		}
 		for (Slot s : slots) {
 			monitor.checkCancelled();
 			if (s instanceof Return r && noReturns.contains(r.function())) {
@@ -347,6 +382,99 @@ final class E200TypeFlow {
 			}
 		}
 		return typed;
+	}
+
+	/** Whether a group has a pointer to a structure, union or array of its own */
+	private static boolean pointsToComposite(List<DataType> group) {
+		for (DataType t : group) {
+			if (t instanceof Pointer p && p.getDataType() instanceof Composite c &&
+				!c.getCategoryPath().equals(E200Tables.CATEGORY)) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	/**
+	 * A pointer to the structure of a group, named after its first global, else the first
+	 * parameter or return value; null if the shape gives no fields
+	 */
+	private static Pointer structurePointer(Program program, List<Slot> group,
+			E200Structures.Shape shape, boolean signedChar) {
+		Slot first = null;
+		for (Slot s : group) {
+			if (first == null || rank(s) < rank(first) ||
+				rank(s) == rank(first) && name(s).compareTo(name(first)) < 0) {
+				first = s;
+			}
+		}
+		DataTypeManager manager = program.getDataTypeManager();
+		String name = "P_" + name(first);
+		DataType existing = manager.getDataType(E200Tables.CATEGORY, name);
+		if (!(existing instanceof Structure)) {
+			Structure built = E200Structures.build(manager, shape, name, signedChar, 0);
+			if (built == null) {
+				return null;
+			}
+			existing = manager.addDataType(built, DataTypeConflictHandler.DEFAULT_HANDLER);
+		}
+		return new PointerDataType(existing, 4, manager);
+	}
+
+	private static int rank(Slot s) {
+		return s instanceof Global ? 0 : s instanceof Param ? 1 : 2;
+	}
+
+	private static String name(Slot s) {
+		if (s instanceof Global g) {
+			return g.address().toString(false);
+		}
+		if (s instanceof Param p) {
+			return p.function().toString(false) + "_" + p.index();
+		}
+		return ((Return) s).function().toString(false) + "_ret";
+	}
+
+	/**
+	 * Gives a place that holds an integer or a pointer to a single value, as analysis typed
+	 * it, a pointer to a structure; returns whether it did
+	 */
+	private static boolean setPointer(Program program, Slot s, Pointer pointer,
+			Set<Address> globals, Set<Function> complete, Set<Address> noReturns) {
+		DataType current = current(program, s);
+		if (!E200Structures.replaceable(current)) {
+			return false;
+		}
+		try {
+			if (s instanceof Global g) {
+				Data data = program.getListing().getDefinedDataAt(g.address());
+				if (!globals.contains(g.address()) || data == null) {
+					return false;
+				}
+				program.getListing().clearCodeUnits(g.address(), data.getMaxAddress(), false);
+				program.getListing().createData(g.address(), pointer);
+				return true;
+			}
+			Function f = function(program, s);
+			if (f == null || !complete.contains(f) || f.isThunk() ||
+				f.getSignatureSource().isHigherPriorityThan(SourceType.ANALYSIS)) {
+				return false;
+			}
+			if (s instanceof Param p) {
+				f.getParameter(p.index()).setDataType(pointer, SourceType.ANALYSIS);
+			}
+			else if (!noReturns.contains(f.getEntryPoint())) {
+				f.setReturnType(pointer, SourceType.ANALYSIS);
+			}
+			else {
+				return false;
+			}
+			return true;
+		}
+		catch (InvalidInputException | CodeUnitInsertionException e) {
+			Msg.warn(E200Analyzer.class, "Could not type " + s + ": " + e.getMessage());
+			return false;
+		}
 	}
 
 	private static List<DataType> informativeOnly(List<DataType> types) {

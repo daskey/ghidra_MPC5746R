@@ -172,6 +172,16 @@ decompiles every function and is the longest part of the analysis):
   parameters and return values are linked where decompiled code copies a value from one to
   another, and each group of linked places gets the type all their uses agree on. A
   parameter or return value is typed only when all callers of its function were decompiled.
+- **Structures that pointers point to** (`E200Structures.java`): code that reads or writes
+  through a pointer at constant offsets, as in `*(int *)(param_1 + 8)`, uses a structure
+  the decompiler does not know. What code does with each pointer value (the fields it
+  accesses at each offset with their sizes and types, what a pointer field points to, a
+  stride if it is indexed) is merged over the linked places above. A group with fields at
+  other offsets than 0 gets a structure `P_<place>` with fields `f<offset>`, named after a
+  global, a parameter (`P_<function>_<index>`) or a return value, and its places that hold
+  an integer or a pointer to a single value get a pointer to it, so that the decompiler
+  shows `param_1->f8->f0`. A run of bytes from offset 0, as code accesses a buffer, stays a
+  `byte *`.
 - New types change the decompiled code of the functions that use them, so the analyzer
   decompiles again those that still use undefined places, or use a place now typed as a
   pointer (which shows the data it points to), three rounds at most.
