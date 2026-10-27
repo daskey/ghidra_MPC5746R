@@ -297,8 +297,8 @@ the Ghidra release whose PowerPC files are included.
   opaque ones, against an independent Python model of the Power ISA; all pass (5,688 failed
   with Ghidra's semantics). See `tools/vle_test`.
 - **Firmware:** the disassembly of four MPC5746R images (1.3 million instructions) matches
-  NXP's binutils 2.28 apart from mnemonic aliases, the e200z425 saturated math, which
-  binutils 2.28 lacks, and the instructions below.
+  NXP's binutils 2.28 apart from mnemonic aliases, the e200z425 saturated math and
+  `e_ldmvmcsrrw`/`e_stmvmcsrrw`, which binutils 2.28 lacks, and the instructions below.
 
 ### Differences from GNU objdump
 
