@@ -292,9 +292,13 @@ the Ghidra release whose PowerPC files are included.
 - **LSP semantics:** 156,000 randomized single-instruction tests in Ghidra's p-code
   emulator against an independent Python model of the manual's pseudo-RTL; all pass. See
   `tools/lsp_test`.
-- **VLE semantics:** 90,000 randomized single-instruction tests of 199 integer, branch,
-  load/store and EFPU2 instructions against an independent Python model of the Power ISA;
-  all pass (5,259 failed with Ghidra's semantics). See `tools/vle_test`.
+- **VLE semantics:** 130,000 randomized single-instruction tests of 283 integer, CR,
+  branch, load/store and EFPU2 instructions, all those the test images use except the
+  opaque ones, against an independent Python model of the Power ISA; all pass (5,688 failed
+  with Ghidra's semantics). See `tools/vle_test`.
+- **Firmware:** the disassembly of four MPC5746R images (1.3 million instructions) matches
+  NXP's binutils 2.28 apart from mnemonic aliases, the e200z425 saturated math, which
+  binutils 2.28 lacks, and the instructions below.
 
 ### Differences from GNU objdump
 
@@ -309,7 +313,9 @@ the Ghidra release whose PowerPC files are included.
 - Instructions of older e200 and e500 cores that the MPC57xx core lacks are not decoded:
   `ev*`, `efd*`, branch buffer and external PID cache locking, `mfdcrx`/`mtdcrx`, TLB.
 - Ghidra's unmodified PowerPC files also decode some instructions the e200z4 lacks in VLE
-  mode (string, 4xx cache, DCR and TLB access), and show some mnemonics differently.
+  mode (string, 4xx cache and TLB access), and show some mnemonics differently.
+- `mtdcr` and `mfdcr` decode in VLE mode; binutils 2.28 shows them as data with
+  `-M e200z4`. Firmware for the e200z4 uses them, for example for DCRs 0x1F1, 0x1F2 and 0x1FE.
 
 ### Modelling notes
 

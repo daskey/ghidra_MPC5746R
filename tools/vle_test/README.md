@@ -4,12 +4,14 @@ Runs VLE instructions in Ghidra's p-code emulator from random register states an
 every result with `vle_model.py`, an independent Python model written from the Power ISA
 2.06 Book VLE and EREF 2.0 descriptions, not from the SLEIGH.
 
-The instructions tested are listed in `mnemonics.txt`: those that the MPC5746R test
-firmware uses, except the ones with opaque semantics (DCR, MPU, decorated storage,
-MSR and interrupt control, barriers), plus every form of the conditional branch. That is
-integer arithmetic, logic, shifts and rotates, compares, the CR and SPR moves the model
-covers, loads and stores in all addressing forms, branches, the saturating e200z425
-instructions and EFPU2.
+The instructions tested are listed in `mnemonics.txt`: those that four firmware images for
+the MPC5746R use, except the ones with opaque semantics (DCR, MPU, decorated storage, MSR
+and interrupt control, barriers), plus the record, carry and overflow forms of the integer
+instructions they use and every form of the conditional branch. That is integer arithmetic
+with CA, OV and SO, logic, shifts and rotates, compares, CR logic and the CR, XER and SPR
+moves the model covers, loads and stores in all addressing forms including byte-reversed
+and cache-bypass, load/store multiple, branches, the saturating e200z425 instructions and
+EFPU2.
 
 `RunVleTests.java` decodes random instruction words (biased toward the X-form and EFPU2
 opcodes, some with the operand fields cleared) and keeps up to N distinct encodings of each
@@ -40,34 +42,35 @@ The image must start at 0x10000000 and be 256 KB, the layout `vle_tests.py` assu
 
 ## Results
 
-With the arguments above: 7,556 encodings of 199 mnemonics, 90,672 runs. 88,647 results
-agree with the model and none differ; 2,025 are skipped (below).
+With the arguments above: 10,849 encodings of 283 mnemonics, 130,188 runs. 127,853 results
+agree with the model and none differ; 2,335 are skipped (below).
 
-With Ghidra's own semantics for the instructions that `e200_isa.sinc` corrects, 5,259 of
-88,150 results of the 198 instructions tested then differ (`e_addwss` does not decode
-there), all in these instructions of
-Ghidra's `ppc_vle.sinc`:
+With Ghidra's own semantics for the instructions that `e200_isa.sinc` corrects, 5,688 of
+these results differ, all in these instructions of Ghidra's `ppc_vle.sinc` and
+`ppc_instructions.sinc`:
 
 | Instructions | Results that differ | Ghidra's semantics | Correct |
 |---|---|---|---|
 | `e_b<cc>l`, `e_bdnzl`, `e_bdzl` (conditional branch and link) | 4,800 of 9,600 | sets LR only when taken, and calls the address stored in the word at the target | sets LR either way and calls the target |
-| `e_rlwinm`, `e_rlwimi` | 221 of 1,181 | with MB > ME, a mask without bits MB and ME | bits MB to 31 and 0 to ME |
-| `se_srw`, `se_sraw` | 231 of 1,191 | shift by the low 5 bits of rY | the low 6 bits: 32 to 63 shift all bits out |
-| `se_sraw`, `se_srawi` | 7 of 487 for `se_srawi` | CA set for a negative value and any nonzero shift | CA set when 1 bits are shifted out of a negative value |
+| `e_rlwinm`, `e_rlwimi` | 239 of 1,199 | with MB > ME, a mask without bits MB and ME | bits MB to 31 and 0 to ME |
+| `se_srw`, `se_sraw` | 251 of 1,211 | shift by the low 5 bits of rY | the low 6 bits: 32 to 63 shift all bits out |
+| `se_sraw`, `se_srawi` | 13 of 493 for `se_srawi` | CA set for a negative value and any nonzero shift | CA set when 1 bits are shifted out of a negative value |
+| `e_crorc` | 162 of 642 | crBB \| ~crBA | crBA \| ~crBB |
+| `divw.` | 223 of 689 | sets OV and SO as `divwo.` does | leaves XER as it is |
 
 ## Skipped cases
 
 The model raises `Skip` where the architecture leaves the result undefined or where the
 module's p-code deliberately differs (see the modelling notes in the module README):
 
-- divide by zero and 0x80000000 / -1 (`divw`, `divwu`)
-- update forms with rA=0 or rA=rD, `e_lmw` with rA in the loaded range
+- divide by zero and 0x80000000 / -1 (`divw`, `divwu` and their record and overflow forms)
+- update forms with rA=0 or rA=rD, `e_lmw` and `e_ldmvgprw` with rA in the loaded range
 - accesses that wrap past 0xFFFFFFFF, where the emulator stops with a fault
 - EFPU2 operands or results that are not zero or normal numbers (denormals, infinities,
   NaNs), and NaN operands of `efsabs`/`efsneg`, whose payload the p-code float operations
   do not keep
 - conversions of out-of-range values, which are not saturated
-- `efsctui` of a value exactly halfway between two integers: the p-code rounds it up,
+- `efsctsi`/`efsctui` of a value exactly halfway between two integers: the p-code rounds it up,
   the hardware to even
 - `efsmax`/`efsmin` of equal values, which differ only in the sign of zero
 - `se_bctr`/`se_bctrl` with an odd CTR, which the p-code does not round down

@@ -265,6 +265,22 @@ macro vleShiftRightAlgebraic(rx, n) {
 	local n:1 = OIM5_VLE; vleShiftRightAlgebraic(RX_VLE, n);
 }
 
+# CR OR with complement: crBT = crBA | ~crBB. Ghidra's e_crorc complemented crBA instead
+# (crBB | ~crBA); its crorc outside VLE mode is right.
+:e_crorc CC_D_OP,CC_OP,CC_B_OP	is $(ISVLE) & OP=31 & CC_D_OP & CC_OP & CC_B_OP & CR_D & CR_D_CC & XOP_1_10=417 & BIT_0=0 & BIT_11=0 {
+	setCrBit(CR_D,CR_D_CC,CC_OP | (!CC_B_OP));
+}
+:e_crorc CC_D_OP,CC_OP,CC_B_OP	is $(ISVLE) & OP=31 & CC_D_OP & CC_OP & CC_B_OP & CR_D & CR_D_CC & XOP_1_10=417 & BIT_0=0 & BIT_11=1 {
+	setCrBit(CR_D,CR_D_CC,CC_OP | (!CC_B_OP));
+}
+
+# divw. changes XER only in its overflow form divwo.; Ghidra's divw. set OV and SO as
+# divwo. does. $(ISVLE) makes this more specific than Ghidra's constructor.
+:divw. D,A,B		is $(ISVLE) & OP=31 & D & A & B & OE=0 & XOP_1_9=491 & Rc=1 {
+	D = A s/ B;
+	cr0flags(D);
+}
+
 # ---- Saturated math (e200z425 rev 2, MPC5746R) ----------------------------------
 # Not in any public manual or in GNU binutils. Encodings and semantics were derived from
 # production MPC5746R firmware and checked against IDA Pro; see Ghidra PR #8829.
