@@ -59,8 +59,9 @@ import ghidra.util.task.TaskMonitor;
  * <p>
  * Arrays that code indexes, loading or storing at their address plus an index, have no
  * reference to their start, and tables in flash that code passes by address have no data.
- * They get data of the element size or of the size of the pointer's target, typed from the
- * uses, so that the decompiler shows {@code (&BYTE_4000e46e)[i]} instead of
+ * {@link E200Tables} creates arrays, and arrays of structures, of the indexed ones. The
+ * others get data of the element size or of the size of the pointer's target, typed from
+ * the uses, so that the decompiler shows {@code (&BYTE_4000e46e)[i]} instead of
  * {@code *(undefined1 *)(i + 0x4000e46e)} and {@code &SHORT_09294ba0} instead of
  * {@code (short *)&DAT_09294ba0}.
  * <p>
@@ -134,7 +135,7 @@ final class E200DataTypes {
 	 * globals it shows with no type
 	 */
 	private record Result(Function function, List<Use> uses, E200TypeFlow.Facts facts,
-			List<Address> untyped) {}
+			List<Address> untyped, List<E200Tables.Access> indexed) {}
 
 	/** Rounds of typing, each with the functions whose code the last one changed */
 	private static final int MAX_ROUNDS = 3;
@@ -203,15 +204,16 @@ final class E200DataTypes {
 			}
 
 			// globals from their uses, arrays, places from values, places by default, voids,
-			// results passed on
-			int[] typed = new int[6];
+			// results passed on, tables
+			int[] typed = new int[7];
 			E200PassedResults passed = new E200PassedResults(program);
+			E200Tables tables = new E200Tables(program);
 			for (int round = 1; round <= MAX_ROUNDS; round++) {
 				monitor.setMessage(E200Analyzer.NAME + " - applying");
 				Set<Address> changedGlobals = new HashSet<>();
 				Set<Function> changedFunctions = new HashSet<>();
 				if (typeRound(program, results.values(), functions, complete, changedGlobals,
-					changedFunctions, false, passed, typed, monitor) == 0) {
+					changedFunctions, false, passed, tables, typed, monitor) == 0) {
 					break;
 				}
 				// the functions whose code the new types change
@@ -242,7 +244,11 @@ final class E200DataTypes {
 			}
 			if (defaultsOption) {
 				typeRound(program, results.values(), functions, complete, new HashSet<>(),
-					new HashSet<>(), true, passed, typed, monitor);
+					new HashSet<>(), true, passed, tables, typed, monitor);
+			}
+			if (typed[6] > 0) {
+				Msg.info(E200Analyzer.class, "Created " + typed[6] +
+					" arrays and arrays of structures that code indexes");
 			}
 			if (typed[1] > 0) {
 				Msg.info(E200Analyzer.class, "Created data at " + typed[1] +
@@ -289,15 +295,16 @@ final class E200DataTypes {
 	 * @param changedFunctions gets the functions whose parameters or return values are typed
 	 * @param defaults whether to give the places no code gives a type a default type
 	 * @param passed the return types of functions whose callers use their result
+	 * @param tables the arrays and arrays of structures that code indexes
 	 * @param typed counts of globals typed, arrays created, places typed, places given a
-	 * default type, functions given a void return type and functions whose callers use their
-	 * result typed, added to
+	 * default type, functions given a void return type, functions whose callers use their
+	 * result typed and tables created, added to
 	 * @return the number of changes
 	 */
 	private static int typeRound(Program program, Collection<Result> results,
 			Set<Function> functions, Set<Function> complete, Set<Address> changedGlobals,
 			Set<Function> changedFunctions, boolean defaults, E200PassedResults passed,
-			int[] typed, TaskMonitor monitor) throws CancelledException {
+			E200Tables tables, int[] typed, TaskMonitor monitor) throws CancelledException {
 		Listing listing = program.getListing();
 		Set<Address> typable = new HashSet<>();
 		for (Result result : results) {
@@ -336,11 +343,16 @@ final class E200DataTypes {
 				}
 			}
 		}
+		boolean signedChar = program.getDataTypeManager().getDataOrganization().isSignedChar();
+		List<E200Tables.Access> indexed = new ArrayList<>();
+		for (Result result : results) {
+			indexed.addAll(result.indexed());
+		}
+		typed[6] += tables.update(indexed, defaults, changedGlobals, monitor);
 		List<Address> created = createData(program, undefined, uses, elements);
 		changedGlobals.addAll(created);
 		typed[1] += created.size();
 
-		boolean signedChar = program.getDataTypeManager().getDataOrganization().isSignedChar();
 		for (Map.Entry<Address, List<DataType>> e : uses.entrySet()) {
 			monitor.checkCancelled();
 			DataType type = chooseType(e.getValue(), signedChar, true);
@@ -602,7 +614,8 @@ final class E200DataTypes {
 					HighFunction high = results.getHighFunction();
 					return high == null ? null
 							: new Result(results.getFunction(), globalUses(high),
-								E200TypeFlow.collect(high), untypedGlobals(high));
+								E200TypeFlow.collect(high), untypedGlobals(high),
+								E200Tables.collect(high));
 				}
 			};
 		callback.setTimeout(DECOMPILER_TIMEOUT_SECONDS);

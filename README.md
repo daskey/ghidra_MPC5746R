@@ -152,9 +152,21 @@ decompiles every function and is the longest part of the analysis):
   sign extended is signed, one that is dereferenced is a pointer. A type is applied only
   when the uses agree, except that a `float` wins over integers of its size and integers
   that differ in signedness go to a clear majority. Single bytes become `byte` or `sbyte`.
-- **Arrays and tables**: arrays that code indexes get data of the element size at their
-  start, and addresses used as pointers to a type get data of that type, as in
-  `(&BYTE_4000e46e)[i]` and `FUN_08faf3e0(&SHORT_09294ba0, x)`.
+- **Arrays and tables** (`E200Tables.java`): code reads an element of a global array at the
+  array's address plus the index times a stride, and a field of an array of structures at
+  the field's address in the first element plus the index times the structure size. The
+  accesses with the same stride whose addresses lie within one stride make a table: an
+  array of the field's type if one field fills the stride, otherwise an array of a structure
+  `S_<address>` with fields `f<offset>` (also those code accesses directly in the first
+  element), labeled `tbl_<address>`. A field indexed again, as in a two-dimensional array,
+  is an array itself. The decompiler then shows `tbl_08f9e258[i].f4` instead of
+  `(&BYTE_08f9e25c)[i * 8]`. The length comes from comparisons of the index with a constant
+  (`i < 8`, not `i != 0xff`) and masks (`i & 7`); without one, a table reaches the next
+  element that code accesses or that a pointer in memory points to, within 512 bytes (an
+  array of structures keeps one element if there is none). A table never takes in an access
+  or data that does not fit its elements, code, or another table. Fields are typed from
+  their uses like globals, in every round. Addresses used as pointers to a type get data of
+  that type, as in `FUN_08faf3e0(&SHORT_09294ba0, x)`.
 - **Values passed between functions**: a function that only stores, passes on or returns a
   value gives it no type, but the value has one where it comes from or goes to. Globals,
   parameters and return values are linked where decompiled code copies a value from one to
