@@ -185,7 +185,12 @@ decompiles every function and is the longest part of the analysis):
   an integer or a pointer to a single value get a pointer to it, so that the decompiler
   shows `param_1->f8->f0`. A run of bytes from offset 0, as code accesses a buffer, stays a
   `byte *`, and a group with a place that gets a constant that is no address (an error code
-  passed where other callers pass a pointer) gets no structure.
+  passed where other callers pass a pointer) gets no structure. Data that code passes as a
+  pointer to such a structure, as a map descriptor in flash passed to a lookup function, gets
+  the structure where only single values at its fields are there, and the data its pointer
+  fields point to gets the pointed-to type (all of flash is executable in an image, and the
+  reference analysis would disassemble an undefined target): `lookup(&P_50800274_092923ec,
+  x)` instead of `lookup((P_50800274 *)&USHORT_092923ec, x)`.
 - **Signedness and width of integers** (`E200Integers.java`): the decompiler infers integer
   types before it removes dead code, and `se_cmp`, `se_cmpi` and `e_cmpi`, which compilers
   also use to test for equality, set the less and greater bits with signed comparisons, so

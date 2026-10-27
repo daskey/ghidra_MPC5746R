@@ -317,6 +317,9 @@ final class E200DataTypes {
 		}
 		Map<Address, List<DataType>> uses = new HashMap<>();
 		Map<Address, List<Use>> undefined = new TreeMap<>(); // uses where there is no data
+		// addresses passed as pointers to a structure of the analyzer's
+		Map<Address, Structure> structures = new HashMap<>();
+		Set<Address> conflicting = new HashSet<>();
 		List<E200TypeFlow.Facts> facts = new ArrayList<>();
 		// the types of the elements of arrays, for the default types
 		E200TypeFlow.Facts elements = new E200TypeFlow.Facts();
@@ -325,6 +328,15 @@ final class E200DataTypes {
 			facts.add(result.facts());
 			for (Use use : result.uses()) {
 				if (!typable.contains(use.address())) {
+					continue;
+				}
+				if (use.access() == Access.ADDRESS && ownStructure(use.type())) {
+					Structure s = (Structure) use.type();
+					if (structures.containsKey(use.address()) &&
+						!structures.get(use.address()).isEquivalent(s)) {
+						conflicting.add(use.address());
+					}
+					structures.put(use.address(), s);
 					continue;
 				}
 				Data data = listing.getDefinedDataAt(use.address());
@@ -349,6 +361,13 @@ final class E200DataTypes {
 			indexed.addAll(result.indexed());
 		}
 		typed[6] += tables.update(indexed, defaults, changedGlobals, monitor);
+		for (Map.Entry<Address, Structure> e : structures.entrySet()) {
+			if (!conflicting.contains(e.getKey()) &&
+				structureAt(program, e.getKey(), e.getValue())) {
+				changedGlobals.add(e.getKey());
+				typed[1]++;
+			}
+		}
 		List<Address> created = createData(program, undefined, uses, elements);
 		changedGlobals.addAll(created);
 		typed[1] += created.size();
@@ -695,6 +714,102 @@ final class E200DataTypes {
 		return created;
 	}
 
+	/** Whether a type is a structure that the analyzer created */
+	private static boolean ownStructure(DataType type) {
+		return type instanceof Structure s && s.getCategoryPath().equals(E200Tables.CATEGORY);
+	}
+
+	/**
+	 * Gives the data at an address that code passes as a pointer to a structure that
+	 * structure, where there are only single values there, at fields of their size; returns
+	 * whether it did
+	 */
+	private static boolean structureAt(Program program, Address address, Structure s) {
+		Listing listing = program.getListing();
+		MemoryBlock block = program.getMemory().getBlock(address);
+		if (block == null || block.isVolatile() ||
+			program.getFunctionManager().getFunctionContaining(address) != null) {
+			return false;
+		}
+		Address end;
+		try {
+			end = address.addNoWrap(s.getLength() - 1);
+		}
+		catch (AddressOverflowException e) {
+			return false;
+		}
+		Data at = listing.getDataContaining(address);
+		if (!block.contains(end) || at != null && (!at.getAddress().equals(address) ||
+			!E200Tables.primitive(at.getDataType()))) {
+			return false;
+		}
+		AddressSet range = new AddressSet(address, end);
+		if (listing.getInstructions(range, true).hasNext()) {
+			return false;
+		}
+		for (Data d : listing.getDefinedData(range, true)) {
+			DataType t = d.getDataType();
+			if (!E200Tables.primitive(t) || d.getMaxAddress().compareTo(end) > 0) {
+				return false;
+			}
+			DataTypeComponent c = s.getComponentAt((int) d.getAddress().subtract(address));
+			if (!Undefined.isUndefined(t) && (c == null ||
+				c.getDataType() instanceof DefaultDataType || c.getLength() != d.getLength())) {
+				return false; // a value that is not a field
+			}
+		}
+		try {
+			listing.clearCodeUnits(address, end, false);
+			listing.createData(address, s);
+		}
+		catch (CodeUnitInsertionException e) {
+			return false;
+		}
+		targets(program, listing.getDataAt(address), 0);
+		return true;
+	}
+
+	/**
+	 * Creates data of the pointed-to type where the pointer fields of new data point to
+	 * nothing defined yet, and so on for pointers in that data: in a flash image all of flash
+	 * is executable, and the reference analysis would take an undefined target for code and
+	 * disassemble the data there
+	 */
+	private static void targets(Program program, Data data, int depth) {
+		if (data == null || depth > 3) {
+			return;
+		}
+		Listing listing = program.getListing();
+		List<Data> fields = new ArrayList<>();
+		if (data.getDataType() instanceof Pointer) {
+			fields.add(data);
+		}
+		for (int i = 0; i < data.getNumComponents(); i++) {
+			fields.add(data.getComponent(i));
+		}
+		for (Data field : fields) {
+			if (field == null || !(field.getDataType() instanceof Pointer pointer) ||
+				!(field.getValue() instanceof Address target)) {
+				continue;
+			}
+			DataType type = pointer.getDataType();
+			MemoryBlock block = program.getMemory().getBlock(target);
+			if (type == null || type.getLength() <= 0 || block == null ||
+				!block.isInitialized()) {
+				continue;
+			}
+			try {
+				Address end = target.addNoWrap(type.getLength() - 1);
+				if (block.contains(end) && listing.isUndefined(target, end)) {
+					targets(program, listing.createData(target, type), depth + 1);
+				}
+			}
+			catch (AddressOverflowException | CodeUnitInsertionException e) {
+				// no room for the target
+			}
+		}
+	}
+
 	/** The globals a decompiled function reads or writes with an undefined type */
 	private static List<Address> untypedGlobals(HighFunction high) {
 		List<Address> untyped = new ArrayList<>();
@@ -784,7 +899,8 @@ final class E200DataTypes {
 				DataType target = p.getDataType();
 				if (target != null) {
 					int length = target.getLength();
-					if ((kind(target) != Kind.OTHER || Undefined.isUndefined(target)) &&
+					if (ownStructure(target) ||
+						(kind(target) != Kind.OTHER || Undefined.isUndefined(target)) &&
 						(length == 1 || length == 2 || length == 4 || length == 8)) {
 						types.add(target);
 					}
@@ -810,7 +926,8 @@ final class E200DataTypes {
 									DataType target = p.getDataType();
 									if (target != null) {
 										int length = target.getLength();
-										if ((kind(target) != Kind.OTHER || Undefined.isUndefined(target)) &&
+										if (ownStructure(target) ||
+											(kind(target) != Kind.OTHER || Undefined.isUndefined(target)) &&
 											(length == 1 || length == 2 || length == 4 || length == 8)) {
 											types.add(target);
 										}

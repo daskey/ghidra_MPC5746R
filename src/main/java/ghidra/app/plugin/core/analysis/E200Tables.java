@@ -867,7 +867,7 @@ final class E200Tables {
 	}
 
 	/** Whether a type is a single value: an integer, float, pointer, or undefined */
-	private static boolean primitive(DataType type) {
+	static boolean primitive(DataType type) {
 		DataType base = type instanceof TypeDef t ? t.getBaseDataType() : type;
 		return base instanceof AbstractIntegerDataType || base instanceof AbstractFloatDataType ||
 			base instanceof Pointer || base instanceof Undefined ||
