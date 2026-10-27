@@ -722,7 +722,7 @@ final class E200DataTypes {
 				!symbol.getStorage().isMemoryStorage()) {
 				continue;
 			}
-			DataType type = variable.getDataType();
+			DataType type = E200Integers.of(variable);
 			if (type != null && !Undefined.isUndefined(type)) {
 				Address addr = symbol.getStorage().getMinAddress();
 				Data data = listing.getDefinedDataAt(addr);
@@ -760,9 +760,8 @@ final class E200DataTypes {
 				continue;
 			}
 			HighVariable variable = value.getHigh();
-			uses.add(new Use(space.getAddress(base),
-				variable == null ? null : variable.getDataType(), value.getSize(),
-				Access.INDEXED));
+			uses.add(new Use(space.getAddress(base), E200Integers.of(variable),
+				value.getSize(), Access.INDEXED));
 		}
 		return uses;
 	}

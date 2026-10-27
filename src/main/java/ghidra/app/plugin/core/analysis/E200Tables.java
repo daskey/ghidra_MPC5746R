@@ -143,7 +143,7 @@ final class E200Tables {
 				continue;
 			}
 			HighVariable variable = value.getHigh();
-			DataType type = variable == null ? null : variable.getDataType();
+			DataType type = E200Integers.of(variable);
 			accesses.add(main == null ? new Access(address, size, type, 0, 0, 0)
 					: new Access(address, size, type, main.scale(),
 						inner == main.scale() ? 0 : inner, bound(main.index())));

@@ -184,7 +184,18 @@ decompiles every function and is the longest part of the analysis):
   global, a parameter (`P_<function>_<index>`) or a return value, and its places that hold
   an integer or a pointer to a single value get a pointer to it, so that the decompiler
   shows `param_1->f8->f0`. A run of bytes from offset 0, as code accesses a buffer, stays a
-  `byte *`.
+  `byte *`, and a group with a place that gets a constant that is no address (an error code
+  passed where other callers pass a pointer) gets no structure.
+- **Signedness and width of integers** (`E200Integers.java`): the decompiler infers integer
+  types before it removes dead code, and `se_cmp`, `se_cmpi` and `e_cmpi`, which compilers
+  also use to test for equality, set the less and greater bits with signed comparisons, so
+  values that code only compares for equality came out signed. The signedness is taken
+  instead from the operations that remain on a value: sign extension, signed comparisons,
+  arithmetic shifts and signed division make it signed, their counterparts unsigned, and a
+  value without either is unsigned. Integers that analysis typed get the signedness of the
+  uses of their group. A parameter that the callee masks or truncates to one or two bytes
+  before every use (`param_1 & 0xff`) is a `byte` or `ushort` (Decompiler Parameter ID gives
+  it the register's four bytes).
 - New types change the decompiled code of the functions that use them, so the analyzer
   decompiles again those that still use undefined places, or use a place now typed as a
   pointer (which shows the data it points to), three rounds at most.

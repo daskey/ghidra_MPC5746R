@@ -42,7 +42,8 @@ import ghidra.program.model.pcode.*;
  * a pointer to a single value, as the decompiler typed them, get a pointer to it. A field of
  * a size that differs from that of most accesses at its offset, or that overlaps the
  * previous field, is left out. Places of another type, such as a pointer to a structure
- * already, are left alone.
+ * already, are left alone, and so is a group with a place that gets a constant that is no
+ * address in memory, as an error code passed where other callers pass a pointer.
  */
 final class E200Structures {
 
@@ -267,8 +268,7 @@ final class E200Structures {
 	}
 
 	private static DataType type(Varnode v) {
-		HighVariable high = v.getHigh();
-		return high == null ? null : high.getDataType();
+		return E200Integers.of(v);
 	}
 
 	/**

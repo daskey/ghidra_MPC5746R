@@ -84,6 +84,15 @@ final class E200TypeFlow {
 	static final class Facts {
 		final List<Map.Entry<Slot, DataType>> types = new ArrayList<>();
 		final List<Map.Entry<Slot, Slot>> copies = new ArrayList<>();
+		/** How the uses of the values of places show their signedness */
+		final Map<Slot, Integer> signs = new HashMap<>();
+		/**
+		 * The parameters that the function only uses masked or truncated to 1 or 2 bytes:
+		 * that width, and the signedness evidence of the narrowed values
+		 */
+		final Map<Slot, int[]> widths = new HashMap<>();
+		/** The places that get a constant that is no address in memory: not only pointers */
+		final Set<Slot> integers = new HashSet<>();
 		/** What code does with the values of places used as pointers */
 		final List<Map.Entry<Slot, E200Structures.Shape>> shapes = new ArrayList<>();
 		/** The function, if the decompiler sees no value returned by it */
@@ -132,7 +141,14 @@ final class E200TypeFlow {
 			HighSymbol param = locals.getParamSymbol(i);
 			HighVariable variable = param.getHighVariable();
 			if (variable != null) {
-				facts.type(new Param(entry, param.getCategoryIndex()), variable.getDataType());
+				Slot slot = new Param(entry, param.getCategoryIndex());
+				facts.type(slot, E200Integers.of(variable));
+				facts.signs.merge(slot, E200Integers.evidence(variable), Integer::sum);
+				int[] narrowed = new int[1];
+				int width = E200Integers.width(variable, narrowed);
+				if (width < 4) {
+					facts.widths.put(slot, new int[] { width, narrowed[0] });
+				}
 			}
 		}
 		Iterator<HighSymbol> globals = high.getGlobalSymbolMap().getSymbols();
@@ -140,7 +156,8 @@ final class E200TypeFlow {
 			HighVariable variable = globals.next().getHighVariable();
 			Slot global = variable == null ? null : global(variable.getRepresentative());
 			if (global != null) {
-				facts.type(global, variable.getDataType());
+				facts.type(global, E200Integers.of(variable));
+				facts.signs.merge(global, E200Integers.evidence(variable), Integer::sum);
 			}
 		}
 		Iterator<PcodeOpAST> ops = high.getPcodeOps();
@@ -160,6 +177,8 @@ final class E200TypeFlow {
 					}
 					if (op.getOutput() != null) {
 						facts.type(new Return(target), type(op.getOutput()));
+						facts.signs.merge(new Return(target),
+							E200Integers.evidence(op.getOutput().getHigh()), Integer::sum);
 						Slot global = global(op.getOutput()); // the result goes to a global
 						if (global != null) {
 							facts.copies.add(Map.entry(global, new Return(target)));
@@ -189,6 +208,15 @@ final class E200TypeFlow {
 	/** A value goes to {@code sink}: its type is one of the sink's, and it links its source. */
 	private static void flow(Facts facts, FunctionManager functions, Address entry, Varnode value,
 			Slot sink) {
+		if (value != null && value.isConstant() && value.getSize() == 4 && value.getOffset() != 0) {
+			Program program = functions.getProgram();
+			Address address = program.getAddressFactory()
+					.getDefaultAddressSpace()
+					.getTruncatedAddress(value.getOffset(), true);
+			if (!program.getMemory().contains(address)) {
+				facts.integers.add(sink);
+			}
+		}
 		facts.type(sink, type(value));
 		Slot source = source(functions, entry, value, 0);
 		if (source != null && !source.equals(sink)) {
@@ -264,7 +292,7 @@ final class E200TypeFlow {
 			}
 			return null;
 		}
-		return v.getHigh().getDataType();
+		return E200Integers.of(v.getHigh());
 	}
 
 	/** Whether the type says more than its size */
@@ -314,6 +342,15 @@ final class E200TypeFlow {
 		Set<Slot> slots = new HashSet<>(seen.keySet());
 		slots.addAll(parent.keySet());
 		slots.addAll(parent.values());
+		for (Facts f : facts) {
+			slots.addAll(f.signs.keySet());
+		}
+		Set<Slot> integers = new HashSet<>(); // groups that get constants other than addresses
+		for (Facts f : facts) {
+			for (Slot s : f.integers) {
+				integers.add(find(parent, s));
+			}
+		}
 		Map<Slot, E200Structures.Shape> shapes = new HashMap<>(); // by group
 		for (Facts f : facts) {
 			for (Map.Entry<Slot, E200Structures.Shape> e : f.shapes) {
@@ -334,7 +371,8 @@ final class E200TypeFlow {
 		// pointers to structures, before the types of single values
 		for (Map.Entry<Slot, E200Structures.Shape> e : shapes.entrySet()) {
 			monitor.checkCancelled();
-			if (!e.getValue().structure() || pointsToComposite(groups.get(e.getKey()))) {
+			if (!e.getValue().structure() || pointsToComposite(groups.get(e.getKey())) ||
+				integers.contains(e.getKey())) {
 				continue;
 			}
 			List<Slot> group = members.get(e.getKey());
@@ -379,6 +417,42 @@ final class E200TypeFlow {
 				if (set(program, r, VoidDataType.dataType, globals, complete, noReturns)) {
 					typed.voids().add(r);
 				}
+			}
+		}
+		// parameters of one or two bytes that arrive in a register of four
+		Set<Slot> narrowed = new HashSet<>();
+		for (Facts f : facts) {
+			for (Map.Entry<Slot, int[]> e : f.widths.entrySet()) {
+				Slot s = e.getKey();
+				DataType current = current(program, s);
+				if (current == null || current.getLength() != 4 || current instanceof TypeDef ||
+					!E200Integers.integer(current) && !Undefined.isUndefined(current)) {
+					continue;
+				}
+				narrowed.add(s);
+				DataType type = E200Integers.withSign(E200DataTypes.unsigned(e.getValue()[0]),
+					e.getValue()[1]);
+				if (setInteger(program, s, type, globals, complete)) {
+					typed.fromValues().add(s);
+				}
+			}
+		}
+		// the signedness of the integers analysis typed, from the uses of their group
+		Map<Slot, Integer> signs = new HashMap<>();
+		for (Facts f : facts) {
+			f.signs.forEach((s, e) -> signs.merge(find(parent, s), e, Integer::sum));
+		}
+		for (Slot s : slots) {
+			monitor.checkCancelled();
+			DataType current = current(program, s);
+			if (!E200Integers.integer(current) || current instanceof TypeDef ||
+				narrowed.contains(s) || s instanceof Return r && noReturns.contains(r.function())) {
+				continue;
+			}
+			DataType type =
+				E200Integers.withSign(current, signs.getOrDefault(find(parent, s), 0));
+			if (!type.isEquivalent(current) && setInteger(program, s, type, globals, complete)) {
+				typed.fromValues().add(s);
 			}
 		}
 		return typed;
@@ -468,6 +542,42 @@ final class E200TypeFlow {
 			}
 			else {
 				return false;
+			}
+			return true;
+		}
+		catch (InvalidInputException | CodeUnitInsertionException e) {
+			Msg.warn(E200Analyzer.class, "Could not type " + s + ": " + e.getMessage());
+			return false;
+		}
+	}
+
+	/**
+	 * Gives a place that analysis typed as an integer the integer of the other signedness;
+	 * returns whether it did
+	 */
+	private static boolean setInteger(Program program, Slot s, DataType type,
+			Set<Address> globals, Set<Function> complete) {
+		try {
+			if (s instanceof Global g) {
+				Data data = program.getListing().getDefinedDataAt(g.address());
+				if (!globals.contains(g.address()) || data == null ||
+					data.getLength() != type.getLength()) {
+					return false;
+				}
+				program.getListing().clearCodeUnits(g.address(), data.getMaxAddress(), false);
+				program.getListing().createData(g.address(), type);
+				return true;
+			}
+			Function f = function(program, s);
+			if (f == null || !complete.contains(f) || f.isThunk() ||
+				f.getSignatureSource().isHigherPriorityThan(SourceType.ANALYSIS)) {
+				return false;
+			}
+			if (s instanceof Param p) {
+				f.getParameter(p.index()).setDataType(type, SourceType.ANALYSIS);
+			}
+			else {
+				f.setReturnType(type, SourceType.ANALYSIS);
 			}
 			return true;
 		}
