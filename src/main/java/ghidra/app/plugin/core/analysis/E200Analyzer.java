@@ -21,6 +21,7 @@ import ghidra.app.services.*;
 import ghidra.app.util.importer.MessageLog;
 import ghidra.framework.options.Options;
 import ghidra.program.model.address.*;
+import ghidra.program.model.lang.Register;
 import ghidra.program.model.listing.*;
 import ghidra.program.model.mem.Memory;
 import ghidra.program.model.mem.MemoryBlock;
@@ -30,15 +31,15 @@ import ghidra.util.task.TaskMonitor;
 /**
  * The analysis of the NXP e200z4 VLE language ({@code PowerPC:BE:32:VLE-e200}), in one
  * analyzer. It runs where Ghidra's constant reference analyzers run, on the code analysis
- * finds:
+ * finds. At the start of each analysis, the first and every later one, it works out
  * <ul>
- * <li>the entry points of flash images in memory not searched yet
- * ({@link E200EntryPoints})</li>
- * <li>the small data area bases r13 and r2, and constant propagation with switch table
- * recovery ({@link E200ConstantPropagation})</li>
+ * <li>the entry points of flash images ({@link E200EntryPoints})</li>
+ * <li>the small data area bases r13 and r2 ({@link E200SmallDataBases})</li>
  * </ul>
- * and it schedules the rest after Decompiler Parameter ID, for the functions it has not
- * handled yet:
+ * and on all code, constant propagation with switch table recovery
+ * ({@link E200ConstantPropagation}), again where the bases changed. It schedules the rest
+ * after Decompiler Parameter ID, for the functions with code that is new or that the bases
+ * changed, and every function it has not seen:
  * <ul>
  * <li>the MPC5746R peripherals ({@link E200Peripherals})</li>
  * <li>functions in gaps, calling conventions for kept registers and the signatures of
@@ -46,6 +47,8 @@ import ghidra.util.task.TaskMonitor;
  * <li>RAM blocks and the types of globals, parameters and return values
  * ({@link E200DataTypes})</li>
  * </ul>
+ * An analysis ends with the data types step; code given to the analyzer after it, as when the
+ * user disassembles more or runs the analyzer as one-shot analysis, starts the next.
  */
 public class E200Analyzer extends AbstractAnalyzer {
 
@@ -60,6 +63,7 @@ public class E200Analyzer extends AbstractAnalyzer {
 			"signatures, and the types of globals, parameters and return values.";
 
 	private final E200ConstantPropagation propagation = new E200ConstantPropagation();
+	private final E200SmallDataBases smallDataBases = new E200SmallDataBases();
 	private final E200EntryPoints entryPoints = new E200EntryPoints();
 	private final E200Peripherals peripherals = new E200Peripherals();
 	private final E200Functions functions = new E200Functions();
@@ -73,8 +77,11 @@ public class E200Analyzer extends AbstractAnalyzer {
 		AnalysisPriority.DATA_TYPE_PROPOGATION.after().after().after(), this::completeFunctions);
 	private final Stage dataTypeStage =
 		new Stage(AnalysisPriority.DATA_TYPE_PROPOGATION.after().after().after().after(),
-			(program, analyzed, monitor, log) -> dataTypes.apply(program, analyzed, monitor));
+			this::completeAnalysis);
 	private final List<Stage> stages = List.of(peripheralStage, functionStage, dataTypeStage);
+
+	/** Whether an analysis is under way: from the first code given to the data types step */
+	private boolean analyzing;
 
 	public E200Analyzer() {
 		super(NAME, DESCRIPTION, AnalyzerType.INSTRUCTION_ANALYZER);
@@ -91,6 +98,7 @@ public class E200Analyzer extends AbstractAnalyzer {
 	@Override
 	public void registerOptions(Options options, Program program) {
 		propagation.registerOptions(options, program);
+		smallDataBases.registerOptions(options);
 		entryPoints.registerOptions(options);
 		peripherals.registerOptions(options);
 		functions.registerOptions(options);
@@ -100,6 +108,7 @@ public class E200Analyzer extends AbstractAnalyzer {
 	@Override
 	public void optionsChanged(Options options, Program program) {
 		propagation.optionsChanged(options, program);
+		smallDataBases.optionsChanged(options);
 		entryPoints.optionsChanged(options);
 		peripherals.optionsChanged(options);
 		functions.optionsChanged(options);
@@ -109,10 +118,16 @@ public class E200Analyzer extends AbstractAnalyzer {
 	@Override
 	public boolean added(Program program, AddressSetView set, TaskMonitor monitor, MessageLog log)
 			throws CancelledException {
-		entryPoints.find(program, monitor);
-		boolean ok = propagation.added(program, set, monitor, log);
+		AddressSet code = new AddressSet(set);
+		if (!analyzing) {
+			analyzing = true;
+			entryPoints.find(program, monitor);
+			code.add(E200ConstantPropagation.forget(program,
+				smallDataBases.update(program, monitor), monitor));
+		}
+		boolean ok = propagation.added(program, code, monitor, log);
 		for (Stage stage : stages) {
-			stage.schedule(program, set);
+			stage.schedule(program, code);
 		}
 		return ok;
 	}
@@ -144,6 +159,27 @@ public class E200Analyzer extends AbstractAnalyzer {
 		return set.isEmpty() ? memory.getLoadedAndInitializedAddressSet() : set;
 	}
 
+	/** Whether an instruction writes a register or a register that contains it */
+	static boolean writes(Instruction instruction, Register register) {
+		for (Object result : instruction.getResultObjects()) {
+			if (result instanceof Register r && r.contains(register)) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	/** The data types step, which ends the analysis */
+	private boolean completeAnalysis(Program program, Set<Function> analyzed, TaskMonitor monitor,
+			MessageLog log) throws CancelledException {
+		try {
+			return dataTypes.apply(program, analyzed, monitor);
+		}
+		finally {
+			analyzing = false;
+		}
+	}
+
 	/** The work of a stage, for the functions it has not handled yet. */
 	private interface Step {
 		boolean apply(Program program, Set<Function> analyzed, TaskMonitor monitor,
@@ -152,13 +188,14 @@ public class E200Analyzer extends AbstractAnalyzer {
 
 	/**
 	 * A step that runs later in analysis, at its own priority, scheduled as one-time analysis
-	 * under the name of this analyzer. It handles the functions it has not handled before, and
-	 * those at the start of code this analyzer was given since it last ran, as when it runs as
-	 * one-time analysis on a selection.
+	 * under the name of this analyzer. It handles the functions with code the analyzer was
+	 * given since the step last ran, new code or code whose small data area bases changed, and
+	 * the functions it has not seen before, such as those created on existing code.
 	 */
 	private static final class Stage extends AbstractAnalyzer {
 		private final Step step;
-		private final Set<Address> handled = new HashSet<>();
+		/** The entry points of the functions the step has seen */
+		private final Set<Address> seen = new HashSet<>();
 		private final AddressSet requested = new AddressSet();
 		private boolean scheduled;
 
@@ -193,15 +230,13 @@ public class E200Analyzer extends AbstractAnalyzer {
 			scheduled = false;
 			Set<Function> analyzed = new HashSet<>();
 			for (Function f : program.getFunctionManager().getFunctions(true)) {
-				Address entry = f.getEntryPoint();
-				if (!f.isThunk() && (!handled.contains(entry) || requested.contains(entry))) {
+				monitor.checkCancelled();
+				boolean unseen = seen.add(f.getEntryPoint());
+				if (!f.isThunk() && (unseen || f.getBody().intersects(requested))) {
 					analyzed.add(f);
 				}
 			}
 			requested.clear();
-			for (Function f : analyzed) {
-				handled.add(f.getEntryPoint());
-			}
 			return step.apply(program, analyzed, monitor, log);
 		}
 	}

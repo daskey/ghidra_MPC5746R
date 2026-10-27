@@ -25,7 +25,7 @@ separate files:
 - `e200_isa.sinc`:
   - MPU (`mpure`, `mpuwe`, `mpusync`), decorated storage including the cache bypass forms,
     `wait`, `e_ldmvmcsrrw`/`e_stmvmcsrrw`, `nego`, `lwarx` with EH=1, `dcbt`/`dcbtst` with a
-    cache target
+    cache target, the loads that bypass the data cache (`lbcbx`, `lhcbx`, `lwcbx`)
   - the saturated math of the e200z425 (`e_addwus`, `e_addhus`, ..., `e_addwss`)
   - corrections of Ghidra's VLE instructions:
     - `e_ori.` no longer decodes as `e_nop`; `e_cmp16i` and related instructions are no
@@ -45,7 +45,10 @@ separate files:
 - `ppc_32_e200.cspec`: the PowerPC EABI of e200 compilers: arguments in r3-r10, floats
   included; results in r3 (r3:r4 for 8 bytes, and structures of up to 8 bytes); unsigned
   `char`; r2 and r13 (small data area bases) preserved; no `__get_pc_thunk_lr` call fixup,
-  which models a classic PowerPC idiom that VLE code cannot execute.
+  which models a classic PowerPC idiom that VLE code cannot execute. MSR and the SPRs other
+  than XER, LR, CTR and SPEFSCR are global state of the core, so the decompiler shows them as
+  globals (`tbl[PIR & 0xffff]`, `(MSR >> 0xf & 1) != 0`, `SPRG0 = x`) instead of `in_PIR`
+  inputs, and keeps writes to them.
 - `data/patterns/e200_VLE_patterns.xml`: VLE function start patterns (the prologues
   `se_mflr r0; se_stw r0,4(r1)`, `e_stwu r1,-X(r1)`, ... after returns, branches, padding
   or erased flash), used instead of Ghidra's classic PowerPC patterns, which VLE code does
@@ -57,16 +60,19 @@ separate files:
 
 One analyzer, **PowerPC e200** (`E200Analyzer.java`), does all the analysis below and runs
 by default for this language; each step has its options under it in **Analysis Options**.
-It runs on the code that analysis finds, where Ghidra's constant reference analyzers run:
-it finds entry points, assumes the small data area bases and propagates constants. It
-schedules the peripherals, functions and data types steps later in analysis, after
-Decompiler Parameter ID, for the functions it has not handled yet. To apply it to an
-existing program or a selection, run it with **Analysis > One Shot**.
+It runs on the code that analysis finds, where Ghidra's constant reference analyzers run.
+At the start of every analysis, not only the first, it finds the entry points and works
+out the small data area bases, and it propagates constants in the new code and again where
+the bases changed. It schedules the peripherals, functions and data types steps later in
+analysis, after Decompiler Parameter ID, for the functions with new or changed code and
+those it has not seen. Each step leaves what is already marked up as it is, so running
+analysis again, or the analyzer on a selection with **Analysis > One Shot**, redoes only
+what changed.
 
 ### Entry points
 
-`E200EntryPoints.java` finds the entry points of raw flash images, in memory not searched
-before (option **Find boot headers and interrupt vectors**):
+`E200EntryPoints.java` finds the entry points of raw flash images at every analysis (option
+**Find boot headers and interrupt vectors**):
 - **Boot headers** of the MPC57xx boot assist flash (`0x005A....` at the start of a flash
   block or a 16 KB boundary): typed `MPC57xx_boot_header`, with a function `reset` (or
   `reset_0`, `reset_1`, ...) at each core's reset vector.
@@ -76,20 +82,28 @@ before (option **Find boot headers and interrupt vectors**):
 
 ### Small data area bases and constant references
 
+- **Small data area bases** (`E200SmallDataBases.java`). The analyzer assumes the EABI
+  bases r13 (`_SDA_BASE_`) and r2 (`_SDA2_BASE_`) in executable memory, so that
+  `e_lwz r3,-0x7ff0(r13)` resolves to a global. The values come from the linker symbols or
+  from the startup code that loads the registers, found even where analysis does not reach
+  it. When an image holds several programs, such as a bootloader and an application, each
+  value applies to the code its startup code reaches, up to the erased flash before the next
+  program; code copied to local memory gets the values of the program it was copied from.
+  They are worked out at every analysis: the analyzer records the values it sets in the
+  program and replaces them where the symbols, the startup code or the memory changed, or
+  where they were removed. Where a value changes, the references that the code using it got
+  from the earlier value are removed and constants are propagated there again. Values the
+  loader or the user set, or that the user changed, are left alone. Option **Assume small
+  data area bases**.
+
 `E200ConstantPropagation.java` is derived from Ghidra's PowerPC Constant Reference
 Analyzer, which the processor spec disables, as it does the Basic one.
-- **Small data area bases.** The analyzer assumes the EABI bases r13 (`_SDA_BASE_`) and r2
-  (`_SDA2_BASE_`) in executable memory, so that `e_lwz r3,-0x7ff0(r13)` resolves to a
-  global. The values come from register values already set (never changed), the linker
-  symbols, or the startup code that loads the registers, found even where analysis does
-  not reach it. When an image holds several programs, such as a bootloader and an
-  application, each value applies to the code its startup code reaches, up to the erased
-  flash before the next program; code copied to local memory gets the values of the
-  program it was copied from. Option **Assume small data area bases**.
 - **VLE instructions.** No references from `e_lis`, which holds only the upper half of an
   address, or from constants loaded with `e_li`, `se_li`, `se_bgeni` and `se_bmaski`.
 - **Switch tables** behind `se_bctr`, bounded by VLE compares, also in flash images loaded
   into a writable block. Option **Switch Table Recovery**.
+- **Split array addresses.** An array address that code adds around the index, the lower
+  half with `e_add16i` or `e_addi` and the upper half with `e_add2is`, gets a reference.
 
 ### Peripherals
 
@@ -152,23 +166,81 @@ decompiles every function and is the longest part of the analysis):
   sign extended is signed, one that is dereferenced is a pointer. A type is applied only
   when the uses agree, except that a `float` wins over integers of its size and integers
   that differ in signedness go to a clear majority. Single bytes become `byte` or `sbyte`.
-- **Arrays and tables**: arrays that code indexes get data of the element size at their
-  start, and addresses used as pointers to a type get data of that type, as in
-  `(&BYTE_4000e46e)[i]` and `FUN_08faf3e0(&SHORT_09294ba0, x)`.
+- **Arrays and tables** (`E200Tables.java`): code reads an element of a global array at the
+  array's address plus the index times a stride, and a field of an array of structures at
+  the field's address in the first element plus the index times the structure size. The
+  accesses with the same stride whose addresses lie within one stride make a table: an
+  array of the field's type if one field fills the stride, otherwise an array of a structure
+  `S_<address>` with fields `f<offset>` (also those code accesses directly in the first
+  element), labeled `tbl_<address>`. A field indexed again, as in a two-dimensional array,
+  is an array itself. The decompiler then shows `tbl_08f9e258[i].f4` instead of
+  `(&BYTE_08f9e25c)[i * 8]`. The length comes from comparisons of the index with a constant
+  (`i < 8`, not `i != 0xff`) and masks (`i & 7`); without one, a table reaches the next
+  element that code accesses or that a pointer in memory points to, within 512 bytes (an
+  array of structures keeps one element if there is none). A table never takes in an access
+  or data that does not fit its elements, code, or another table. Where code indexes one
+  address with several strides, as in `a[i]` and `a[2 * i]`, an array of the smallest
+  stride whose elements all the accesses are wins over a structure of the larger one.
+  Fields are typed from their uses like globals, in every round. A pointer field gets the
+  type code casts it to, `float *` for `*(float *)tbl[i].f34`, or a pointer to a structure
+  the analyzer made for a parameter it is passed as, and the data it points to gets the
+  pointed-to type: Ghidra's reference analysis would otherwise take an undefined target for
+  a pointer if its value is an address, as the float 2.0 (0x40000000, the start of SRAM)
+  is, or for code. Addresses used as pointers to a type get data of that type, as in
+  `FUN_08faf3e0(&SHORT_09294ba0, x)`.
 - **Values passed between functions**: a function that only stores, passes on or returns a
   value gives it no type, but the value has one where it comes from or goes to. Globals,
   parameters and return values are linked where decompiled code copies a value from one to
   another, and each group of linked places gets the type all their uses agree on. A
   parameter or return value is typed only when all callers of its function were decompiled.
+- **Structures that pointers point to** (`E200Structures.java`): code that reads or writes
+  through a pointer at constant offsets, as in `*(int *)(param_1 + 8)`, uses a structure
+  the decompiler does not know. What code does with each pointer value (the fields it
+  accesses at each offset with their sizes and types, what a pointer field points to, a
+  stride if it is indexed) is merged over the linked places above. A group with fields at
+  other offsets than 0 gets a structure `P_<place>` with fields `f<offset>`, named after a
+  global, a parameter (`P_<function>_<index>`) or a return value, and its places that hold
+  an integer or a pointer to a single value get a pointer to it, so that the decompiler
+  shows `param_1->f8->f0`. A run of bytes from offset 0, as code accesses a buffer, stays a
+  `byte *`; a pointer indexed with several strides, as the data of a lookup table whose
+  element type a field selects, is a `void *`; and a group with a place that gets a
+  constant that is no address (an error code passed where other callers pass a pointer)
+  gets no structure. Data that code passes as a pointer to such a structure, as a map
+  descriptor in flash passed to a lookup function, gets the structure where only single
+  values at its fields are there, and the data its pointer fields point to gets the
+  pointed-to type (a byte for a `void *`; all of flash is executable in an image, and the
+  reference analysis would disassemble an undefined target): `lookup(&P_50800274_092923ec,
+  x)` instead of `lookup((P_50800274 *)&USHORT_092923ec, x)`.
+- **Signedness and width of integers** (`E200Integers.java`): the decompiler infers integer
+  types before it removes dead code, and `se_cmp`, `se_cmpi` and `e_cmpi`, which compilers
+  also use to test for equality, set the less and greater bits with signed comparisons, so
+  values that code only compares for equality came out signed. The signedness is taken
+  instead from the operations that remain on a value: sign extension, signed comparisons,
+  arithmetic shifts and signed division make it signed, their counterparts unsigned, and a
+  value without either is unsigned. Integers that analysis typed get the signedness of the
+  uses of their group. A parameter that the callee masks or truncates to one or two bytes
+  before every use (`param_1 & 0xff`) is a `byte` or `ushort` (Decompiler Parameter ID gives
+  it the register's four bytes), and so is a return value that every caller uses so.
 - New types change the decompiled code of the functions that use them, so the analyzer
-  decompiles again those that still use undefined places, or use a place now typed as a
-  pointer (which shows the data it points to), three rounds at most.
+  decompiles again those that still use undefined places or table fields, or use a place
+  now typed as a pointer (which shows the data it points to), three rounds at most, and
+  after the default types below those that use pointer fields still untyped.
 - **Unsigned types for untyped values** (option): places whose group shows no type at all,
   values that are only copied, compared for equality or accessed in bytes, get the unsigned
   integer of their size, and pointers to undefined data of 1, 2 or 4 bytes a pointer to it,
   unless a linked value is a pointer, a `float` or of another size. Functions that return
-  nothing, whose result no caller reads, get the return type `void`, which Decompiler
-  Parameter ID leaves undefined.
+  nothing get the return type `void`, which Decompiler Parameter ID leaves undefined, and so
+  do functions whose undefined result no decompiled caller reads, such as handlers called
+  through a table that leave a callee's result in r3.
+- **Results callers use** (`E200PassedResults.java`): e200 compilers do not turn
+  `return g(x);` into a branch to `g`. The function calls `g` and returns with the result of
+  `g` still in r3, which Decompiler Parameter ID misses when `g` had no return type yet. A
+  function whose callers read r3 after calling it, or return it from a function whose result
+  is used, is not given `void`. It gets the return type of the functions whose results it
+  passes on. If it does not only pass results on and an instruction of a caller reads the
+  result, it gets `undefined4`, which the steps above type where they can: Parameter ID also
+  misses results that some paths compute and others get from an indirect call. Without this,
+  callers show such results as `extraout_r3`.
 
 A flash image has no RAM, so RAM variables have no data and the decompiler shows them as
 `_DAT_40001234`. The analyzer therefore first adds uninitialized blocks for the MPC5746R
@@ -243,12 +315,19 @@ the Ghidra release whose PowerPC files are included.
 - **LSP semantics:** 156,000 randomized single-instruction tests in Ghidra's p-code
   emulator against an independent Python model of the manual's pseudo-RTL; all pass. See
   `tools/lsp_test`.
-- **VLE semantics:** 90,000 randomized single-instruction tests of 199 integer, branch,
-  load/store and EFPU2 instructions against an independent Python model of the Power ISA;
-  all pass (5,259 failed with Ghidra's semantics). See `tools/vle_test`.
+- **VLE semantics:** 130,000 randomized single-instruction tests of 283 integer, CR,
+  branch, load/store and EFPU2 instructions, all those the test images use except the
+  opaque ones, against an independent Python model of the Power ISA; all pass (5,688 failed
+  with Ghidra's semantics). See `tools/vle_test`.
+- **Firmware:** the disassembly of four MPC5746R images (1.3 million instructions) matches
+  NXP's binutils 2.28 apart from mnemonic aliases, the e200z425 saturated math and
+  `e_ldmvmcsrrw`/`e_stmvmcsrrw`, which binutils 2.28 lacks, and the instructions below.
 
 ### Differences from GNU objdump
 
+- `lbcbx`, `lhcbx` and `lwcbx` (X-form, XO 516, 548 and 580) decode; binutils shows them as
+  data. AUTOSAR OS code for the e200z4 uses XO 548 and 580; XO 516 follows the pattern of
+  the decorated forms.
 - Encodings with nonzero reserved fields are not decoded, for example EFPU2 compares with
   bits 9-10 set, or `efsabs` with a nonzero rB.
 - LSP encodings the manual defines as illegal are not decoded: an odd rD or rS for
@@ -257,7 +336,9 @@ the Ghidra release whose PowerPC files are included.
 - Instructions of older e200 and e500 cores that the MPC57xx core lacks are not decoded:
   `ev*`, `efd*`, branch buffer and external PID cache locking, `mfdcrx`/`mtdcrx`, TLB.
 - Ghidra's unmodified PowerPC files also decode some instructions the e200z4 lacks in VLE
-  mode (string, 4xx cache, DCR and TLB access), and show some mnemonics differently.
+  mode (string, 4xx cache and TLB access), and show some mnemonics differently.
+- `mtdcr` and `mfdcr` decode in VLE mode; binutils 2.28 shows them as data with
+  `-M e200z4`. Firmware for the e200z4 uses them, for example for DCRs 0x1F1, 0x1F2 and 0x1FE.
 
 ### Modelling notes
 

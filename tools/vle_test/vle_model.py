@@ -78,6 +78,12 @@ def crf(text):
     return int(text[2:])
 
 
+def crbit(text):
+    """A CR bit as the field and its mask: '4*cr7+so', or 'gt' in cr0."""
+    m = re.fullmatch(r'(?:4\*cr(\d)\+)?(lt|gt|eq|so)', text)
+    return int(m.group(1) or 0), {'lt': LT, 'gt': GT, 'eq': EQ, 'so': SO}[m.group(2)]
+
+
 def memop(text):
     m = MEM_RE.match(text)
     return num(m.group(1)), (None if m.group(2) == '0' else int(m.group(2)[1:]))
@@ -316,6 +322,10 @@ def execute(mnemonic, operands, st, length):
             r.cr[0] = compare(s32(x), imm, st.so)
         elif base == 'se_cmpli':
             r.cr[0] = compare(x, imm, st.so)
+        elif base == 'se_cmph':
+            r.cr[0] = compare(sext(x & 0xFFFF, 16), sext(y & 0xFFFF, 16), st.so)
+        elif base == 'se_cmphl':
+            r.cr[0] = compare(x & 0xFFFF, y & 0xFFFF, st.so)
         elif base == 'se_extsb':
             setg(rx, sext(x, 8))
         elif base == 'se_extsh':
@@ -431,6 +441,56 @@ def execute(mnemonic, operands, st, length):
             else:
                 v = max(0, b - a)
             setg(rd, v)
+        elif base in ('e_cmph', 'e_cmphl'):
+            field, a, b = crf(ops[0]), g[reg(ops[1])] & 0xFFFF, g[reg(ops[2])] & 0xFFFF
+            if base == 'e_cmph':
+                a, b = sext(a, 16), sext(b, 16)
+            r.cr[field] = compare(a, b, st.so)
+        elif base in ('e_cmph16i', 'e_cmphl16i'):
+            a, imm = g[reg(ops[0])] & 0xFFFF, num(ops[1]) & 0xFFFF
+            if base == 'e_cmph16i':
+                a, imm = sext(a, 16), sext(imm, 16)
+            r.cr[0] = compare(a, imm, st.so)
+        elif base == 'e_mcrf':
+            r.cr[crf(ops[0])] = st.cr[crf(ops[1])]
+        elif base in ('e_crand', 'e_crandc', 'e_creqv', 'e_crnand', 'e_crnor', 'e_cror',
+                      'e_crorc', 'e_crxor'):
+            (fd, bd), (fa, ba), (fb, bb) = crbit(ops[0]), crbit(ops[1]), crbit(ops[2])
+            a, b = bool(st.cr[fa] & ba), bool(st.cr[fb] & bb)
+            v = {'e_crand': a and b, 'e_crandc': a and not b, 'e_creqv': a == b,
+                 'e_crnand': not (a and b), 'e_crnor': not (a or b), 'e_cror': a or b,
+                 'e_crorc': a or not b, 'e_crxor': a != b}[base]
+            r.cr[fd] = (st.cr[fd] & ~bd) | (bd if v else 0)
+        elif base == 'e_rlwi':
+            ra, rs, sh = reg(ops[0]), reg(ops[1]), num(ops[2])
+            v = rotl(g[rs], sh)
+            setg(ra, v)
+            if record:
+                cr0(v)
+        elif base == 'e_addic':
+            rd, a, imm = reg(ops[0]), g[reg(ops[1])], num(ops[2]) & M32
+            v = a + imm
+            r.xer['ca'] = int(v > M32)
+            setg(rd, v)
+            if record:
+                cr0(v & M32)
+        elif base in ('e_add2i', 'e_mull2i'):
+            ra, imm = reg(ops[0]), num(ops[1])
+            v = g[ra] + imm if base == 'e_add2i' else s32(g[ra]) * imm
+            setg(ra, v)
+            if record:
+                cr0(v & M32)
+        elif base in ('e_ldmvgprw', 'e_stmvgprw'):
+            disp, ra = memop(ops[0])
+            ea = ((g[ra] if ra is not None else 0) + disp) & M32
+            regs = [0] + list(range(3, 13))  # the volatile GPRs, r0 and r3-r12
+            if base == 'e_ldmvgprw' and ra in regs:
+                raise Skip('rA in the loaded registers')
+            for i, n in enumerate(regs):
+                if base == 'e_ldmvgprw':
+                    setg(n, st.load(ea + 4 * i, 4))
+                else:
+                    r.store(ea + 4 * i, 4, g[n])
         else:
             raise KeyError(mnemonic)
         return r
@@ -468,6 +528,15 @@ def execute(mnemonic, operands, st, length):
         elif base in ('efscfsi', 'efscfui'):
             v = s32(a) if base == 'efscfsi' else a
             setg(rd, bits(float(v)))
+        elif base == 'efsctsi':
+            need_normal(a)
+            x = f32(a)
+            if x - math.floor(x) == 0.5:
+                raise Skip('halfway: the p-code rounds up, not to even (README)')
+            v = round(x)  # round half to even
+            if not -2**31 <= v < 2**31:
+                raise Skip('out of range: not saturated (README)')
+            setg(rd, v)
         elif base in ('efsctsiz', 'efsctuiz', 'efsctui'):
             need_normal(a)
             x = f32(a)
@@ -493,6 +562,48 @@ def execute(mnemonic, operands, st, length):
 
     # -- 32-bit X-form integer --
     d = reg(ops[0]) if ops and ops[0].startswith('r') else None
+    m = (re.fullmatch(r'(add|addc|adde|subf|subfc|subfe|neg|mullw|divw|divwu)(o)', base) or
+         re.fullmatch(r'(addc|adde|subfc|subfe)()', base))
+    if m:
+        op, overflow = m.group(1), bool(m.group(2))
+        a = g[reg(ops[1])]
+        b = g[reg(ops[2])] if op != 'neg' else 0
+        ca = None
+        if op in ('add', 'addc', 'adde'):
+            cin = st.ca if op == 'adde' else 0
+            full, sv = a + b + cin, s32(a) + s32(b) + cin
+            if op != 'add':
+                ca = int(full > M32)
+        elif op in ('subf', 'subfc', 'subfe'):  # ~rA + rB + 1, or + CA
+            cin = st.ca if op == 'subfe' else 1
+            full, sv = (~a & M32) + b + cin, -s32(a) - 1 + s32(b) + cin
+            if op != 'subf':
+                ca = int(full > M32)
+        elif op == 'neg':
+            full = sv = -s32(a)
+        elif op == 'mullw':
+            full = sv = s32(a) * s32(b)
+        elif op == 'divw':
+            if b == 0 or (a == 0x80000000 and b == M32):
+                raise Skip('undefined quotient')
+            q = abs(s32(a)) // abs(s32(b))
+            full = sv = q if (s32(a) < 0) == (s32(b) < 0) else -q
+        else:
+            if b == 0:
+                raise Skip('undefined quotient')
+            full = sv = a // b
+        setg(d, full)
+        if ca is not None:
+            r.xer['ca'] = ca
+        so = st.so
+        if overflow:
+            ov = 0 if op == 'divwu' else int(not -2**31 <= sv < 2**31)
+            r.xer['ov'] = ov
+            so = int(st.so or ov)
+            r.xer['so'] = so
+        if record:
+            r.cr[0] = cr_signed(full & M32, so)
+        return r
     if base in ('add', 'subf', 'divw', 'divwu', 'mullw'):
         a, b = g[reg(ops[1])], g[reg(ops[2])]
         if base == 'add':
@@ -523,7 +634,7 @@ def execute(mnemonic, operands, st, length):
         setg(d, v)
         if record:
             cr0(v)
-    elif base in ('and', 'andc', 'or', 'orc', 'nor', 'xor', 'eqv', 'slw', 'srw', 'sraw'):
+    elif base in ('and', 'andc', 'or', 'orc', 'nor', 'nand', 'xor', 'eqv', 'slw', 'srw', 'sraw'):
         s, b = g[reg(ops[1])], g[reg(ops[2])]
         if base in ('slw', 'srw', 'sraw'):
             n = b & 0x3F
@@ -536,7 +647,7 @@ def execute(mnemonic, operands, st, length):
                 r.xer['ca'] = int(s32(s) < 0 and (s & ((1 << min(n, 32)) - 1) & M32) != 0)
         else:
             v = {'and': s & b, 'andc': s & ~b, 'or': s | b, 'orc': s | ~b, 'nor': ~(s | b),
-                 'xor': s ^ b, 'eqv': ~(s ^ b)}[base]
+                 'nand': ~(s & b), 'xor': s ^ b, 'eqv': ~(s ^ b)}[base]
         setg(d, v)
         if record:
             cr0(v & M32)
@@ -544,6 +655,29 @@ def execute(mnemonic, operands, st, length):
         s, n = g[reg(ops[1])], num(ops[2])
         setg(d, s32(s) >> n)
         r.xer['ca'] = int(s32(s) < 0 and (s & ((1 << n) - 1)) != 0)
+        if record:
+            cr0((s32(s) >> n) & M32)
+    elif base in ('mulhw', 'mulhwu'):
+        a, b = g[reg(ops[1])], g[reg(ops[2])]
+        v = (s32(a) * s32(b) if base == 'mulhw' else a * b) >> 32
+        setg(d, v)
+        if record:
+            cr0(v & M32)
+    elif base == 'mcrxr':
+        r.cr[crf(ops[0])] = (LT if st.so else 0) | (GT if st.ov else 0) | (EQ if st.ca else 0)
+        r.xer['so'] = r.xer['ov'] = r.xer['ca'] = 0
+    elif base in ('lwbrx', 'lhbrx', 'stwbrx', 'sthbrx', 'lbcbx', 'lhcbx', 'lwcbx'):
+        rt, ra = reg(ops[0]), reg_or_zero(ops[1])
+        ea = ((g[ra] if ra is not None else 0) + g[reg(ops[2])]) & M32
+        size = {'lwbrx': 4, 'lhbrx': 2, 'stwbrx': 4, 'sthbrx': 2, 'lbcbx': 1, 'lhcbx': 2,
+                'lwcbx': 4}[base]
+        reverse = lambda v: int.from_bytes((v & ((1 << 8 * size) - 1)).to_bytes(size, 'big')[::-1], 'big')
+        if base.startswith('st'):
+            r.store(ea, size, reverse(g[rt]))
+        elif base.endswith('brx'):
+            setg(rt, reverse(st.load(ea, size)))
+        else:  # cache bypass: an ordinary load
+            setg(rt, st.load(ea, size))
     elif base in ('extsb', 'extsh', 'cntlzw'):
         s = g[reg(ops[1])]
         if base == 'cntlzw':

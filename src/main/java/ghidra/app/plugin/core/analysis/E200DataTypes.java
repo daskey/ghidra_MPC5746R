@@ -59,8 +59,9 @@ import ghidra.util.task.TaskMonitor;
  * <p>
  * Arrays that code indexes, loading or storing at their address plus an index, have no
  * reference to their start, and tables in flash that code passes by address have no data.
- * They get data of the element size or of the size of the pointer's target, typed from the
- * uses, so that the decompiler shows {@code (&BYTE_4000e46e)[i]} instead of
+ * {@link E200Tables} creates arrays, and arrays of structures, of the indexed ones. The
+ * others get data of the element size or of the size of the pointer's target, typed from
+ * the uses, so that the decompiler shows {@code (&BYTE_4000e46e)[i]} instead of
  * {@code *(undefined1 *)(i + 0x4000e46e)} and {@code &SHORT_09294ba0} instead of
  * {@code (short *)&DAT_09294ba0}.
  * <p>
@@ -134,10 +135,12 @@ final class E200DataTypes {
 	 * globals it shows with no type
 	 */
 	private record Result(Function function, List<Use> uses, E200TypeFlow.Facts facts,
-			List<Address> untyped) {}
+			List<Address> untyped, List<E200Tables.Access> indexed) {}
 
 	/** Rounds of typing, each with the functions whose code the last one changed */
 	private static final int MAX_ROUNDS = 3;
+	/** Pointers in one piece of data whose targets are typed */
+	private static final int MAX_POINTERS = 4096;
 
 	void registerOptions(Options options) {
 		options.registerOption(OPTION_NAME, enabled, null, OPTION_DESCRIPTION);
@@ -154,8 +157,9 @@ final class E200DataTypes {
 	}
 
 	/**
-	 * Adds the RAM blocks, at the end of analysis (see the class comment), and types the
-	 * globals, parameters and return values that the functions use.
+	 * Adds the RAM blocks that are not there yet, at the end of every analysis (see the class
+	 * comment), creates data where code accesses RAM that has none, and types the globals,
+	 * parameters and return values that the functions use.
 	 */
 	boolean apply(Program program, Set<Function> analyzed, TaskMonitor monitor)
 			throws CancelledException {
@@ -163,10 +167,8 @@ final class E200DataTypes {
 			return true;
 		}
 		if (addRamBlocksOption) {
-			AddressSetView ram = addRamBlocks(program);
-			if (!ram.isEmpty()) {
-				createAccessedData(program, ram, monitor);
-			}
+			addRamBlocks(program);
+			createAccessedData(program, unmappedRam(program), monitor);
 		}
 		if (analyzed.isEmpty()) {
 			return true;
@@ -202,14 +204,17 @@ final class E200DataTypes {
 				}
 			}
 
-			// globals from their uses, arrays, places from values, places by default, voids
-			int[] typed = new int[5];
+			// globals from their uses, arrays, places from values, places by default, voids,
+			// results passed on, tables
+			int[] typed = new int[7];
+			E200PassedResults passed = new E200PassedResults(program);
+			E200Tables tables = new E200Tables(program);
 			for (int round = 1; round <= MAX_ROUNDS; round++) {
 				monitor.setMessage(E200Analyzer.NAME + " - applying");
 				Set<Address> changedGlobals = new HashSet<>();
 				Set<Function> changedFunctions = new HashSet<>();
 				if (typeRound(program, results.values(), functions, complete, changedGlobals,
-					changedFunctions, false, typed, monitor) == 0) {
+					changedFunctions, false, passed, tables, typed, monitor) == 0) {
 					break;
 				}
 				// the functions whose code the new types change
@@ -218,6 +223,11 @@ final class E200DataTypes {
 				for (Result r : results.values()) {
 					for (Use u : r.uses()) {
 						if (changedGlobals.contains(u.address())) {
+							affected.add(r.function());
+						}
+					}
+					for (E200Tables.Access a : r.indexed()) {
+						if (changedGlobals.contains(a.address())) {
 							affected.add(r.function());
 						}
 					}
@@ -231,16 +241,36 @@ final class E200DataTypes {
 					}
 				}
 				affected.retainAll(results.keySet());
-				// only those that still use an undefined place, or a place now typed as a
-				// pointer, which shows the places it points to, can show more
-				affected.removeIf(
-					f -> !pointing.contains(f) && !usesOpenPlace(program, results.get(f)));
+				// only those that still use an undefined place or table field, or a place now
+				// typed as a pointer, which shows the places it points to, can show more
+				affected.removeIf(f -> !pointing.contains(f) &&
+					!usesOpenPlace(program, results.get(f)) &&
+					!usesOpenField(tables, results.get(f)));
 				monitor.setMessage(E200Analyzer.NAME + " - decompiling again");
 				decompile(program, affected, results, monitor);
 			}
 			if (defaultsOption) {
 				typeRound(program, results.values(), functions, complete, new HashSet<>(),
-					new HashSet<>(), true, typed, monitor);
+					new HashSet<>(), true, passed, tables, typed, monitor);
+				// with default types, code shows more of what the pointers in tables that are
+				// still untyped point to, as in (uint *)tbl[i].f4 where the value goes to a
+				// global now typed uint
+				Set<Function> open = new HashSet<>();
+				for (Result r : results.values()) {
+					if (usesOpenField(tables, r)) {
+						open.add(r.function());
+					}
+				}
+				if (!open.isEmpty()) {
+					monitor.setMessage(E200Analyzer.NAME + " - decompiling again");
+					decompile(program, open, results, monitor);
+					typeRound(program, results.values(), functions, complete, new HashSet<>(),
+						new HashSet<>(), false, passed, tables, typed, monitor);
+				}
+			}
+			if (typed[6] > 0) {
+				Msg.info(E200Analyzer.class, "Created " + typed[6] +
+					" arrays and arrays of structures that code indexes");
 			}
 			if (typed[1] > 0) {
 				Msg.info(E200Analyzer.class, "Created data at " + typed[1] +
@@ -262,6 +292,10 @@ final class E200DataTypes {
 				Msg.info(E200Analyzer.class, "Gave " + typed[4] +
 					" functions that return nothing the return type void");
 			}
+			if (typed[5] > 0) {
+				Msg.info(E200Analyzer.class, "Gave " + typed[5] +
+					" functions whose callers use their result a return type");
+			}
 		}
 		catch (CancelledException | InterruptedException e) {
 			throw new CancelledException();
@@ -282,14 +316,17 @@ final class E200DataTypes {
 	 * @param changedGlobals gets the globals typed or created
 	 * @param changedFunctions gets the functions whose parameters or return values are typed
 	 * @param defaults whether to give the places no code gives a type a default type
+	 * @param passed the return types of functions whose callers use their result
+	 * @param tables the arrays and arrays of structures that code indexes
 	 * @param typed counts of globals typed, arrays created, places typed, places given a
-	 * default type and functions given a void return type, added to
+	 * default type, functions given a void return type, functions whose callers use their
+	 * result typed and tables created, added to
 	 * @return the number of changes
 	 */
 	private static int typeRound(Program program, Collection<Result> results,
 			Set<Function> functions, Set<Function> complete, Set<Address> changedGlobals,
-			Set<Function> changedFunctions, boolean defaults, int[] typed, TaskMonitor monitor)
-			throws CancelledException {
+			Set<Function> changedFunctions, boolean defaults, E200PassedResults passed,
+			E200Tables tables, int[] typed, TaskMonitor monitor) throws CancelledException {
 		Listing listing = program.getListing();
 		Set<Address> typable = new HashSet<>();
 		for (Result result : results) {
@@ -302,6 +339,9 @@ final class E200DataTypes {
 		}
 		Map<Address, List<DataType>> uses = new HashMap<>();
 		Map<Address, List<Use>> undefined = new TreeMap<>(); // uses where there is no data
+		// addresses passed as pointers to a structure of the analyzer's
+		Map<Address, Structure> structures = new HashMap<>();
+		Set<Address> conflicting = new HashSet<>();
 		List<E200TypeFlow.Facts> facts = new ArrayList<>();
 		// the types of the elements of arrays, for the default types
 		E200TypeFlow.Facts elements = new E200TypeFlow.Facts();
@@ -310,6 +350,15 @@ final class E200DataTypes {
 			facts.add(result.facts());
 			for (Use use : result.uses()) {
 				if (!typable.contains(use.address())) {
+					continue;
+				}
+				if (use.access() == Access.ADDRESS && E200Tables.ownStructure(use.type())) {
+					Structure s = (Structure) use.type();
+					if (structures.containsKey(use.address()) &&
+						!structures.get(use.address()).isEquivalent(s)) {
+						conflicting.add(use.address());
+					}
+					structures.put(use.address(), s);
 					continue;
 				}
 				Data data = listing.getDefinedDataAt(use.address());
@@ -328,11 +377,23 @@ final class E200DataTypes {
 				}
 			}
 		}
+		boolean signedChar = program.getDataTypeManager().getDataOrganization().isSignedChar();
+		List<E200Tables.Access> indexed = new ArrayList<>();
+		for (Result result : results) {
+			indexed.addAll(result.indexed());
+		}
+		typed[6] += tables.update(indexed, defaults, changedGlobals, monitor);
+		for (Map.Entry<Address, Structure> e : structures.entrySet()) {
+			if (!conflicting.contains(e.getKey()) &&
+				structureAt(program, e.getKey(), e.getValue())) {
+				changedGlobals.add(e.getKey());
+				typed[1]++;
+			}
+		}
 		List<Address> created = createData(program, undefined, uses, elements);
 		changedGlobals.addAll(created);
 		typed[1] += created.size();
 
-		boolean signedChar = program.getDataTypeManager().getDataOrganization().isSignedChar();
 		for (Map.Entry<Address, List<DataType>> e : uses.entrySet()) {
 			monitor.checkCancelled();
 			DataType type = chooseType(e.getValue(), signedChar, true);
@@ -342,11 +403,25 @@ final class E200DataTypes {
 			}
 		}
 		FunctionManager manager = program.getFunctionManager();
+		// before the functions that return nothing are given void
+		List<Function> passing = passed.apply(monitor);
+		typed[5] += passing.size();
+		changedFunctions.addAll(passing);
 		E200TypeFlow.Typed flow =
 			E200TypeFlow.apply(program, facts, uses, typable, complete, defaults, monitor);
+		// and after, for the functions whose results the flow typed: a wrapper given void
+		// then returns their type
+		passing = passed.apply(monitor);
+		typed[5] += passing.size();
+		changedFunctions.addAll(passing);
 		typed[2] += flow.fromValues().size();
 		typed[3] += flow.byDefault().size();
 		typed[4] += flow.voids().size();
+		for (Function f : passing) {
+			if (flow.voids().contains(new E200TypeFlow.Return(f.getEntryPoint()))) {
+				typed[4]--;
+			}
+		}
 		for (E200TypeFlow.Slot slot : flow.fromValues()) {
 			Address function = null;
 			if (slot instanceof E200TypeFlow.Global g) {
@@ -387,6 +462,16 @@ final class E200DataTypes {
 		}
 		for (Map.Entry<E200TypeFlow.Slot, DataType> t : result.facts().types) {
 			if (E200TypeFlow.open(program, t.getKey())) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	/** Whether a function accesses a table field that is untyped or points to undefined */
+	private static boolean usesOpenField(E200Tables tables, Result result) {
+		for (E200Tables.Access a : result.indexed()) {
+			if (tables.openField(a.address())) {
 				return true;
 			}
 		}
@@ -454,11 +539,8 @@ final class E200DataTypes {
 	 * Adds blocks for the parts of the MPC5746R RAM that have nothing mapped, such as the
 	 * space around a dump of part of the RAM. A part is named after its RAM with its start
 	 * address ({@code SRAM_40000000}) unless it is the whole RAM.
-	 *
-	 * @return the address ranges of the added blocks
 	 */
-	private static AddressSetView addRamBlocks(Program program) {
-		AddressSet added = new AddressSet();
+	private static void addRamBlocks(Program program) {
 		List<String> names = new ArrayList<>();
 		Memory memory = program.getMemory();
 		AddressSpace space = program.getAddressFactory().getDefaultAddressSpace();
@@ -473,7 +555,6 @@ final class E200DataTypes {
 						range.getMinAddress(), range.getLength(), false);
 					block.setPermissions(true, true, ram.execute());
 					block.setComment(ram.description() + ", added by " + E200Analyzer.NAME);
-					added.add(range);
 					names.add(name);
 				}
 				catch (LockException | MemoryConflictException | AddressOverflowException e) {
@@ -485,7 +566,23 @@ final class E200DataTypes {
 		if (!names.isEmpty()) {
 			Msg.info(E200Analyzer.class, "Added RAM blocks " + String.join(", ", names));
 		}
-		return added;
+	}
+
+	/** The MPC5746R RAM in uninitialized blocks, as the analyzer adds them */
+	private static AddressSetView unmappedRam(Program program) {
+		AddressSet ram = new AddressSet();
+		AddressSpace space = program.getAddressFactory().getDefaultAddressSpace();
+		for (RamBlock block : RAM_BLOCKS) {
+			ram.add(space.getAddress(block.start()),
+				space.getAddress(block.start() + block.length() - 1));
+		}
+		AddressSet unmapped = new AddressSet();
+		for (MemoryBlock block : program.getMemory().getBlocks()) {
+			if (!block.isInitialized()) {
+				unmapped.add(block.getStart(), block.getEnd());
+			}
+		}
+		return ram.intersect(unmapped);
 	}
 
 	/**
@@ -502,22 +599,15 @@ final class E200DataTypes {
 		while (it.hasNext()) {
 			monitor.checkCancelled();
 			Address addr = it.next();
-			// the most frequent access size, the larger one on a tie
-			Map<Integer, Integer> counts = new HashMap<>();
+			List<Integer> sizes = new ArrayList<>();
 			for (Reference ref : references.getReferencesTo(addr)) {
 				Instruction instr = listing.getInstructionAt(ref.getFromAddress());
 				int size = instr == null ? 0 : accessSize(instr);
 				if (size > 0) {
-					counts.merge(size, 1, Integer::sum);
+					sizes.add(size);
 				}
 			}
-			int size = 0, count = 0;
-			for (Map.Entry<Integer, Integer> e : counts.entrySet()) {
-				if (e.getValue() > count || (e.getValue() == count && e.getKey() > size)) {
-					size = e.getKey();
-					count = e.getValue();
-				}
-			}
+			int size = mostFrequent(sizes);
 			if (size == 0) {
 				continue;
 			}
@@ -531,6 +621,20 @@ final class E200DataTypes {
 				// no room for the access at this address
 			}
 		}
+	}
+
+	/** The most frequent of the sizes, the larger on a tie; 0 if there are none */
+	static int mostFrequent(Collection<Integer> sizes) {
+		Map<Integer, Integer> counts = new HashMap<>();
+		sizes.forEach(size -> counts.merge(size, 1, Integer::sum));
+		int size = 0, count = 0;
+		for (Map.Entry<Integer, Integer> e : counts.entrySet()) {
+			if (e.getValue() > count || e.getValue() == count && e.getKey() > size) {
+				size = e.getKey();
+				count = e.getValue();
+			}
+		}
+		return size;
 	}
 
 	/**
@@ -580,7 +684,8 @@ final class E200DataTypes {
 					HighFunction high = results.getHighFunction();
 					return high == null ? null
 							: new Result(results.getFunction(), globalUses(high),
-								E200TypeFlow.collect(high), untypedGlobals(high));
+								E200TypeFlow.collect(high), untypedGlobals(high),
+								E200Tables.collect(high));
 				}
 			};
 		callback.setTimeout(DECOMPILER_TIMEOUT_SECONDS);
@@ -621,17 +726,7 @@ final class E200DataTypes {
 				functions.getFunctionContaining(base) != null) {
 				continue;
 			}
-			Map<Integer, Integer> counts = new HashMap<>();
-			for (Use use : e.getValue()) {
-				counts.merge(use.size(), 1, Integer::sum);
-			}
-			int size = 0, count = 0;
-			for (Map.Entry<Integer, Integer> c : counts.entrySet()) {
-				if (c.getValue() > count || (c.getValue() == count && c.getKey() > size)) {
-					size = c.getKey();
-					count = c.getValue();
-				}
-			}
+			int size = mostFrequent(e.getValue().stream().map(Use::size).toList());
 			if (size != 1 && size != 2 && size != 4 && size != 8 ||
 				base.getOffset() % size != 0) {
 				continue;
@@ -658,6 +753,142 @@ final class E200DataTypes {
 			}
 		}
 		return created;
+	}
+
+	/**
+	 * Gives the data at an address that code passes as a pointer to a structure that
+	 * structure, where there are only single values there, at fields of their size; returns
+	 * whether it did
+	 */
+	private static boolean structureAt(Program program, Address address, Structure s) {
+		Listing listing = program.getListing();
+		MemoryBlock block = program.getMemory().getBlock(address);
+		if (block == null || block.isVolatile() ||
+			program.getFunctionManager().getFunctionContaining(address) != null) {
+			return false;
+		}
+		Address end;
+		try {
+			end = address.addNoWrap(s.getLength() - 1);
+		}
+		catch (AddressOverflowException e) {
+			return false;
+		}
+		Data at = listing.getDataContaining(address);
+		if (!block.contains(end) || at != null && (!at.getAddress().equals(address) ||
+			!E200Tables.primitive(at.getDataType()))) {
+			return false;
+		}
+		AddressSet range = new AddressSet(address, end);
+		if (listing.getInstructions(range, true).hasNext()) {
+			return false;
+		}
+		for (Data d : listing.getDefinedData(range, true)) {
+			DataType t = d.getDataType();
+			if (!E200Tables.primitive(t) || d.getMaxAddress().compareTo(end) > 0) {
+				return false;
+			}
+			DataTypeComponent c = s.getComponentAt((int) d.getAddress().subtract(address));
+			if (!Undefined.isUndefined(t) && (c == null ||
+				c.getDataType() instanceof DefaultDataType || c.getLength() != d.getLength())) {
+				return false; // a value that is not a field
+			}
+		}
+		try {
+			listing.clearCodeUnits(address, end, false);
+			listing.createData(address, s);
+		}
+		catch (CodeUnitInsertionException e) {
+			return false;
+		}
+		targets(program, listing.getDataAt(address), 0);
+		return true;
+	}
+
+	/**
+	 * Creates data of the pointed-to type where the pointers in new data, its fields and
+	 * elements included, point to nothing defined yet, and so on for pointers in that data. In
+	 * a flash image all of flash is executable, and the reference analysis would take an
+	 * undefined target for code and disassemble it, or for a pointer if its value is an
+	 * address, as a float 2.0 (0x40000000, the start of SRAM) is.
+	 */
+	static void targets(Program program, Data data, int depth) {
+		if (data == null || depth > 3) {
+			return;
+		}
+		Listing listing = program.getListing();
+		List<Data> fields = new ArrayList<>();
+		pointersIn(data, fields, 0);
+		for (Data field : fields) {
+			if (!(field.getDataType() instanceof Pointer pointer) ||
+				!(field.getValue() instanceof Address target)) {
+				continue;
+			}
+			DataType type = pointer.getDataType();
+			if (type instanceof VoidDataType) {
+				type = ByteDataType.dataType; // what is there is not known, but not code
+			}
+			MemoryBlock block = program.getMemory().getBlock(target);
+			if (type == null || type.getLength() <= 0 || block == null ||
+				!block.isInitialized()) {
+				continue;
+			}
+			try {
+				Address end = target.addNoWrap(type.getLength() - 1);
+				if (!block.contains(end)) {
+					continue;
+				}
+				if (!listing.isUndefined(target, end) && untypedAt(listing, target, end, type)) {
+					listing.clearCodeUnits(target, end, false);
+				}
+				if (listing.isUndefined(target, end)) {
+					targets(program, listing.createData(target, type), depth + 1);
+				}
+			}
+			catch (AddressOverflowException | CodeUnitInsertionException e) {
+				// no room for the target
+			}
+		}
+	}
+
+	/**
+	 * Whether there is only untyped data where a pointer to {@code type} points: undefined
+	 * values, or a pointer to nothing in particular of the type's size, which the reference
+	 * analysis makes of a value that is an address, as the float 2.0 (0x40000000) is
+	 */
+	private static boolean untypedAt(Listing listing, Address target, Address end,
+			DataType type) {
+		if (!E200TypeFlow.informative(type) ||
+			listing.getInstructions(new AddressSet(target, end), true).hasNext()) {
+			return false;
+		}
+		Data first = listing.getDataContaining(target);
+		if (first != null && !first.getAddress().equals(target)) {
+			return false;
+		}
+		for (Data d : listing.getDefinedData(new AddressSet(target, end), true)) {
+			DataType t = d.getDataType();
+			boolean guessed = t instanceof Pointer p && !E200TypeFlow.informative(p) &&
+				d.getLength() == type.getLength();
+			if (d.getMaxAddress().compareTo(end) > 0 || !Undefined.isUndefined(t) && !guessed) {
+				return false;
+			}
+		}
+		return true;
+	}
+
+	/** Pointers in data: the data itself, or its components and theirs, as in a table */
+	private static void pointersIn(Data data, List<Data> pointers, int level) {
+		if (data == null || pointers.size() >= MAX_POINTERS) {
+			return;
+		}
+		if (data.getDataType() instanceof Pointer) {
+			pointers.add(data);
+			return;
+		}
+		for (int i = 0; level < 3 && i < data.getNumComponents(); i++) {
+			pointersIn(data.getComponent(i), pointers, level + 1);
+		}
 	}
 
 	/** The globals a decompiled function reads or writes with an undefined type */
@@ -687,7 +918,7 @@ final class E200DataTypes {
 				!symbol.getStorage().isMemoryStorage()) {
 				continue;
 			}
-			DataType type = variable.getDataType();
+			DataType type = E200Integers.of(variable);
 			if (type != null && !Undefined.isUndefined(type)) {
 				Address addr = symbol.getStorage().getMinAddress();
 				Data data = listing.getDefinedDataAt(addr);
@@ -725,9 +956,8 @@ final class E200DataTypes {
 				continue;
 			}
 			HighVariable variable = value.getHigh();
-			uses.add(new Use(space.getAddress(base),
-				variable == null ? null : variable.getDataType(), value.getSize(),
-				Access.INDEXED));
+			uses.add(new Use(space.getAddress(base), E200Integers.of(variable),
+				value.getSize(), Access.INDEXED));
 		}
 		return uses;
 	}
@@ -746,15 +976,8 @@ final class E200DataTypes {
 		while (!queue.isEmpty()) {
 			Varnode v = queue.removeFirst();
 			HighVariable hv = v.getHigh();
-			if (hv != null && hv.getDataType() instanceof Pointer p) {
-				DataType target = p.getDataType();
-				if (target != null) {
-					int length = target.getLength();
-					if ((kind(target) != Kind.OTHER || Undefined.isUndefined(target)) &&
-						(length == 1 || length == 2 || length == 4 || length == 8)) {
-						types.add(target);
-					}
-				}
+			if (hv != null && pointsToValue(hv.getDataType())) {
+				types.add(((Pointer) hv.getDataType()).getDataType());
 			}
 			Iterator<PcodeOp> uses = v.getDescendants();
 			while (uses.hasNext()) {
@@ -768,20 +991,11 @@ final class E200DataTypes {
 				}
 				else if (opcode == PcodeOp.CALL) {
 					Function callee = E200TypeFlow.callee(functions, use);
-					if (callee != null) {
-						for (int i = 1; i < use.getNumInputs(); i++) {
-							if (use.getInput(i) == v && i - 1 < callee.getParameterCount()) {
-								DataType paramType = callee.getParameter(i - 1).getDataType();
-								if (paramType instanceof Pointer p) {
-									DataType target = p.getDataType();
-									if (target != null) {
-										int length = target.getLength();
-										if ((kind(target) != Kind.OTHER || Undefined.isUndefined(target)) &&
-											(length == 1 || length == 2 || length == 4 || length == 8)) {
-											types.add(target);
-										}
-									}
-								}
+					for (int i = 1; callee != null && i < use.getNumInputs(); i++) {
+						if (use.getInput(i) == v && i - 1 < callee.getParameterCount()) {
+							DataType parameter = callee.getParameter(i - 1).getDataType();
+							if (pointsToValue(parameter)) {
+								types.add(((Pointer) parameter).getDataType());
 							}
 						}
 					}
@@ -789,6 +1003,21 @@ final class E200DataTypes {
 			}
 		}
 		return types;
+	}
+
+	/**
+	 * Whether a type is a pointer to a number or pointer of 1, 2, 4 or 8 bytes, undefined
+	 * ones included, or to a structure the analyzer created
+	 */
+	private static boolean pointsToValue(DataType type) {
+		if (!(type instanceof Pointer p) || p.getDataType() == null) {
+			return false;
+		}
+		DataType target = p.getDataType();
+		int length = target.getLength();
+		return E200Tables.ownStructure(target) ||
+			(kind(target) != Kind.OTHER || Undefined.isUndefined(target)) &&
+				(length == 1 || length == 2 || length == 4 || length == 8);
 	}
 
 	/**
