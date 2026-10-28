@@ -17,9 +17,10 @@ package ghidra.app.plugin.core.analysis;
 
 import java.util.*;
 
-import ghidra.program.model.address.Address;
+import ghidra.program.model.address.*;
 import ghidra.program.model.data.*;
 import ghidra.program.model.listing.*;
+import ghidra.program.model.mem.MemoryBlock;
 import ghidra.program.model.pcode.*;
 import ghidra.program.model.symbol.SourceType;
 import ghidra.program.model.util.CodeUnitInsertionException;
@@ -96,6 +97,18 @@ final class E200TypeFlow {
 		final Set<Slot> integers = new HashSet<>();
 		/** What code does with the values of places used as pointers */
 		final List<Map.Entry<Slot, E200Structures.Shape>> shapes = new ArrayList<>();
+		/**
+		 * The addresses of globals that are passed to places, as {@code f(&g)}: the places point
+		 * to the data there
+		 */
+		final List<Map.Entry<Slot, Address>> pointees = new ArrayList<>();
+		/**
+		 * The width of the value the function returns, 1 or 2 if every return gives a value
+		 * extended from that many bytes, with the signedness the extensions show, else null
+		 */
+		int[] returned;
+		/** The function */
+		Address entry;
 		/** The function, if the decompiler sees no value returned by it */
 		Address returnsNothing;
 		/** The function, if its return type is not known yet (not set by Parameter ID) */
@@ -134,6 +147,7 @@ final class E200TypeFlow {
 		Function function = high.getFunction();
 		FunctionManager functions = function.getProgram().getFunctionManager();
 		Address entry = function.getEntryPoint();
+		facts.entry = entry;
 		DataType returned = high.getFunctionPrototype().getReturnType();
 		if (returned == null || returned instanceof VoidDataType) {
 			facts.returnsNothing = entry;
@@ -169,6 +183,7 @@ final class E200TypeFlow {
 				facts.signs.merge(global, E200Integers.evidence(variable), Integer::sum);
 			}
 		}
+		int returns = 0;
 		Iterator<PcodeOpAST> ops = high.getPcodeOps();
 		while (ops.hasNext()) {
 			PcodeOpAST op = ops.next();
@@ -204,6 +219,10 @@ final class E200TypeFlow {
 				case PcodeOp.RETURN -> {
 					if (op.getNumInputs() > 1) {
 						flow(facts, functions, entry, op.getInput(1), new Return(entry));
+						int[] narrow = E200Integers.extended(op.getInput(1), 0);
+						facts.returned = facts.returned == null ? narrow
+								: narrow == null ? null : widest(facts.returned, narrow);
+						returns++;
 					}
 				}
 				case PcodeOp.COPY -> {
@@ -217,6 +236,10 @@ final class E200TypeFlow {
 				}
 			}
 		}
+		if (returns == 0 || facts.returned != null &&
+			(facts.returned[0] == 0 || facts.returned[0] > 2)) {
+			facts.returned = null;
+		}
 		E200Structures.collect(high, facts);
 		return facts;
 	}
@@ -224,8 +247,8 @@ final class E200TypeFlow {
 	/** A value goes to {@code sink}: its type is one of the sink's, and it links its source. */
 	private static void flow(Facts facts, FunctionManager functions, Address entry, Varnode value,
 			Slot sink) {
+		Program program = functions.getProgram();
 		if (value != null && value.isConstant() && value.getSize() == 4 && value.getOffset() != 0) {
-			Program program = functions.getProgram();
 			Address address = program.getAddressFactory()
 					.getDefaultAddressSpace()
 					.getTruncatedAddress(value.getOffset(), true);
@@ -237,6 +260,50 @@ final class E200TypeFlow {
 		Slot source = source(functions, entry, value, 0);
 		if (source != null && !source.equals(sink)) {
 			facts.copies.add(Map.entry(sink, source));
+		}
+		Address pointee = addressOf(program, value, 0);
+		if (pointee != null) {
+			facts.pointees.add(Map.entry(sink, pointee));
+		}
+	}
+
+	/**
+	 * The address of a global that a value is, as in {@code f(&g)} or {@code f((T *)0x40001234)}:
+	 * the address of a symbol, or a constant that is an address in RAM or flash; null otherwise
+	 */
+	static Address addressOf(Program program, Varnode value, int depth) {
+		if (value == null || depth > 3) {
+			return null;
+		}
+		if (value.isConstant()) {
+			if (value.getSize() != 4 || value.getOffset() == 0) {
+				return null;
+			}
+			Address address = program.getAddressFactory()
+					.getDefaultAddressSpace()
+					.getTruncatedAddress(value.getOffset(), true);
+			MemoryBlock block = program.getMemory().getBlock(address);
+			return block == null || block.isVolatile() ? null : address;
+		}
+		PcodeOp def = value.getDef();
+		if (def == null) {
+			return null;
+		}
+		switch (def.getOpcode()) {
+			case PcodeOp.CAST, PcodeOp.COPY -> {
+				return addressOf(program, def.getInput(0), depth + 1);
+			}
+			case PcodeOp.PTRSUB -> {
+				// the address of a global, &DAT_...
+				if (def.getInput(0).isConstant() && def.getInput(0).getOffset() == 0 &&
+					def.getInput(1).isConstant()) {
+					return addressOf(program, def.getInput(1), depth + 1);
+				}
+				return null;
+			}
+			default -> {
+				return null;
+			}
 		}
 	}
 
@@ -386,6 +453,61 @@ final class E200TypeFlow {
 						.merge(e.getValue());
 			}
 		}
+		// The data a place points to: the places that are passed the address of the same global
+		// point to data of one layout, so the groups whose shapes fit together are one group,
+		// with one structure, and the data gets it.
+		Map<Address, Set<Slot>> pointees = new HashMap<>();
+		for (Facts f : facts) {
+			for (Map.Entry<Slot, Address> e : f.pointees) {
+				slots.add(e.getKey());
+				pointees.computeIfAbsent(e.getValue(), a -> new LinkedHashSet<>()).add(e.getKey());
+			}
+		}
+		Map<Slot, Set<Address>> pointed = new HashMap<>(); // the data each group points to
+		Set<Address> disputed = new HashSet<>(); // pointed to by groups that do not fit together
+		for (Map.Entry<Address, Set<Slot>> e : pointees.entrySet()) {
+			monitor.checkCancelled();
+			Slot first = null;
+			for (Slot s : e.getValue()) {
+				Slot root = find(parent, s);
+				if (integers.contains(root)) {
+					continue; // holds integers too: no structure, so nothing to share
+				}
+				if (first == null) {
+					first = root;
+					continue;
+				}
+				if (root.equals(first)) {
+					continue;
+				}
+				E200Structures.Shape a =
+					shapes.computeIfAbsent(first, r -> new E200Structures.Shape());
+				E200Structures.Shape b =
+					shapes.computeIfAbsent(root, r -> new E200Structures.Shape());
+				if (!a.compatible(b)) {
+					disputed.add(e.getKey());
+					continue;
+				}
+				union(parent, root, first);
+				Slot merged = find(parent, first);
+				if (merged.equals(first)) {
+					a.merge(b);
+					shapes.remove(root);
+				}
+				else {
+					b.merge(a);
+					shapes.remove(first);
+					first = merged;
+				}
+			}
+			if (first != null) {
+				pointed.computeIfAbsent(first, r -> new HashSet<>()).add(e.getKey());
+			}
+		}
+		Map<Slot, Set<Address>> byRoot = new HashMap<>();
+		pointed.forEach((s, a) -> byRoot.computeIfAbsent(find(parent, s), r -> new HashSet<>())
+				.addAll(a));
+		pointed = byRoot;
 		Map<Slot, List<DataType>> groups = new HashMap<>();
 		Map<Slot, List<Slot>> members = new HashMap<>();
 		for (Slot s : slots) {
@@ -398,18 +520,33 @@ final class E200TypeFlow {
 		// pointers to structures, before the types of single values
 		for (Map.Entry<Slot, E200Structures.Shape> e : shapes.entrySet()) {
 			monitor.checkCancelled();
-			if (!e.getValue().structure() || pointsToComposite(groups.get(e.getKey())) ||
-				integers.contains(e.getKey())) {
+			if (pointsToComposite(groups.get(e.getKey())) || integers.contains(e.getKey())) {
+				continue;
+			}
+			Set<Address> instances = pointed.getOrDefault(e.getKey(), Set.of());
+			// a value that the group's functions access as one word and other code accesses
+			// in pieces is a structure of the pieces
+			TreeMap<Long, DataType> pieces =
+				pieces(program, instances, e.getValue(), signedChar);
+			if (!e.getValue().structure() && pieces.isEmpty()) {
 				continue;
 			}
 			List<Slot> group = members.get(e.getKey());
-			Pointer pointer = structurePointer(program, group, e.getValue(), signedChar);
+			Pointer pointer = structurePointer(program, group, e.getValue(), signedChar,
+				spacing(instances), pieces);
 			if (pointer == null) {
 				continue;
 			}
 			for (Slot s : group) {
 				if (setPointer(program, s, pointer, globals, complete, untypedReturns)) {
 					typed.fromValues().add(s);
+				}
+			}
+			// the data the group points to
+			for (Address a : pointed.getOrDefault(e.getKey(), Set.of())) {
+				if (globals.contains(a) && !disputed.contains(a) &&
+					E200DataTypes.structureAt(program, a, (Structure) pointer.getDataType())) {
+					typed.fromValues().add(new Global(a));
 				}
 			}
 		}
@@ -419,11 +556,15 @@ final class E200TypeFlow {
 				continue;
 			}
 			List<DataType> group = groups.get(find(parent, s));
+			// a place that gets a constant that is no address, as an error code, holds no
+			// pointer, whatever a caller that passes an address shows
+			boolean integer = integers.contains(find(parent, s));
 			DataType type = E200DataTypes.chooseType(
-				informativeOnly(seen.getOrDefault(s, List.of())), signedChar, false, defaults);
+				informativeOnly(seen.getOrDefault(s, List.of()), integer), signedChar, false,
+				defaults);
 			if (type == null) {
-				type = E200DataTypes.chooseType(informativeOnly(group), signedChar, false,
-					defaults);
+				type = E200DataTypes.chooseType(informativeOnly(group, integer), signedChar,
+					false, defaults);
 			}
 			List<Slot> list = typed.fromValues();
 			if (type == null) {
@@ -452,6 +593,16 @@ final class E200TypeFlow {
 		Map<Slot, int[]> widths = new HashMap<>();
 		for (Facts f : facts) {
 			f.widths.forEach((s, w) -> widths.merge(s, w, E200TypeFlow::widest));
+		}
+		// a function that returns a value extended from a byte or halfword on every path
+		// returns one, whatever its callers do with the register; their uses add signedness
+		for (Facts f : facts) {
+			if (f.returned != null && f.entry != null) {
+				Slot r = new Return(f.entry);
+				int[] callers = widths.get(r);
+				widths.put(r, new int[] { f.returned[0],
+					f.returned[1] + (callers == null ? 0 : callers[1]) });
+			}
 		}
 		Set<Slot> narrowed = new HashSet<>();
 		for (Map.Entry<Slot, int[]> e : widths.entrySet()) {
@@ -513,7 +664,8 @@ final class E200TypeFlow {
 	 * parameter or return value; null if the shape gives no fields
 	 */
 	private static Pointer structurePointer(Program program, List<Slot> group,
-			E200Structures.Shape shape, boolean signedChar) {
+			E200Structures.Shape shape, boolean signedChar, long limit,
+			TreeMap<Long, DataType> pieces) {
 		Slot first = null;
 		for (Slot s : group) {
 			if (first == null || rank(s) < rank(first) ||
@@ -525,13 +677,94 @@ final class E200TypeFlow {
 		String name = "P_" + name(first);
 		DataType existing = manager.getDataType(E200Tables.CATEGORY, name);
 		if (!(existing instanceof Structure)) {
-			Structure built = E200Structures.build(manager, shape, name, signedChar, 0);
+			Structure built =
+				E200Structures.build(manager, shape, name, signedChar, 0, limit, pieces);
 			if (built == null) {
 				return null;
 			}
 			existing = manager.addDataType(built, DataTypeConflictHandler.DEFAULT_HANDLER);
 		}
 		return new PointerDataType(existing, 4, manager);
+	}
+
+	/**
+	 * The pieces of the fields of a shape that the data at the structure's instances shows:
+	 * where code passes the address of a {@code byte} to a function that writes a
+	 * {@code ushort} there, as a value and its complement, the field is the byte and what
+	 * follows it, and the function writes the structure as a whole. By offset in the
+	 * structure, the type of the smaller data at it, when the instances agree.
+	 */
+	private static TreeMap<Long, DataType> pieces(Program program, Set<Address> instances,
+			E200Structures.Shape shape, boolean signedChar) {
+		TreeMap<Long, DataType> pieces = new TreeMap<>();
+		if (instances.isEmpty() || shape.fields.isEmpty()) {
+			return pieces;
+		}
+		Listing listing = program.getListing();
+		Map<Long, List<DataType>> found = new HashMap<>(); // by offset, the data of all instances
+		for (Address instance : instances) {
+			for (Map.Entry<Long, E200Structures.Field> e : shape.fields.entrySet()) {
+				long offset = e.getKey();
+				int size = E200DataTypes.mostFrequent(e.getValue().sizes);
+				if (size <= 1) {
+					continue;
+				}
+				try {
+					Address start = instance.addNoWrap(offset);
+					Address end = start.addNoWrap(size - 1);
+					for (Data d : listing.getDefinedData(new AddressSet(start, end), true)) {
+						if (d.getLength() < size && d.getMaxAddress().compareTo(end) <= 0 &&
+							E200Tables.primitive(d.getDataType()) &&
+							!Undefined.isUndefined(d.getDataType())) {
+							found.computeIfAbsent(offset + d.getAddress().subtract(start),
+								o -> new ArrayList<>()).add(d.getDataType());
+						}
+					}
+				}
+				catch (AddressOverflowException ex) {
+					// no such instance
+				}
+			}
+		}
+		for (Map.Entry<Long, List<DataType>> e : found.entrySet()) {
+			List<Integer> sizes = e.getValue().stream().map(DataType::getLength).toList();
+			int size = E200DataTypes.mostFrequent(sizes);
+			DataType type = E200DataTypes.chooseType(
+				e.getValue().stream().filter(t -> t.getLength() == size).toList(), signedChar,
+				true, true);
+			pieces.put(e.getKey(), type != null ? type : Undefined.getUndefinedDataType(size));
+		}
+		// pieces that overlap each other, where the instances disagree, say nothing
+		long end = -1;
+		for (Iterator<Map.Entry<Long, DataType>> it = pieces.entrySet().iterator(); it
+				.hasNext();) {
+			Map.Entry<Long, DataType> e = it.next();
+			if (e.getKey() < end) {
+				it.remove();
+			}
+			else {
+				end = e.getKey() + e.getValue().getLength();
+			}
+		}
+		return pieces;
+	}
+
+	/**
+	 * How far apart the instances of a structure that code passes by address are at the
+	 * least, which bounds the structure's length: no instance holds another; 0 if there are
+	 * fewer than two
+	 */
+	private static long spacing(Set<Address> instances) {
+		List<Address> sorted = new ArrayList<>(instances);
+		Collections.sort(sorted);
+		long spacing = 0;
+		for (int i = 1; i < sorted.size(); i++) {
+			long gap = sorted.get(i).subtract(sorted.get(i - 1));
+			if (gap > 0 && (spacing == 0 || gap < spacing)) {
+				spacing = gap;
+			}
+		}
+		return spacing;
 	}
 
 	private static int rank(Slot s) {
@@ -628,6 +861,13 @@ final class E200TypeFlow {
 
 	private static List<DataType> informativeOnly(List<DataType> types) {
 		return types.stream().filter(E200TypeFlow::informative).toList();
+	}
+
+	/** The informative types, without the pointers if the place holds integers too */
+	private static List<DataType> informativeOnly(List<DataType> types, boolean noPointers) {
+		return types.stream()
+				.filter(t -> informative(t) && !(noPointers && t instanceof Pointer))
+				.toList();
 	}
 
 	/**

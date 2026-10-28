@@ -131,6 +131,65 @@ final class E200Integers {
 		return width;
 	}
 
+	/**
+	 * The width in bytes of the value a 4-byte value is extended from, 1 or 2 if it is a byte
+	 * or halfword zero or sign extended, or masked to one, on every path (through copies and
+	 * merges of such values, and small constants), with the signedness the extensions show
+	 * (positive for sign extensions); 0 if only small constants are known; null if it is not
+	 * extended from one, or the value is not known
+	 */
+	static int[] extended(Varnode v, int depth) {
+		if (v == null || depth > 6) {
+			return null;
+		}
+		if (v.isConstant()) {
+			// a small constant fits any width and says nothing about it
+			long value = v.getOffset();
+			return value >= 0 && value <= 0xffff ? new int[] { 0, 0 } : null;
+		}
+		if (v.getSize() <= 2) {
+			return new int[] { v.getSize(), 0 };
+		}
+		PcodeOp def = v.getDef();
+		if (def == null) {
+			return null;
+		}
+		switch (def.getOpcode()) {
+			case PcodeOp.INT_ZEXT, PcodeOp.INT_SEXT -> {
+				int size = def.getInput(0).getSize();
+				return size > 2 ? null
+						: new int[] { size, def.getOpcode() == PcodeOp.INT_SEXT ? 1 : -1 };
+			}
+			case PcodeOp.INT_AND -> {
+				Varnode mask = def.getInput(1).isConstant() ? def.getInput(1)
+						: def.getInput(0).isConstant() ? def.getInput(0) : null;
+				if (mask == null) {
+					return null;
+				}
+				return mask.getOffset() == 0xff ? new int[] { 1, -1 }
+						: mask.getOffset() == 0xffff ? new int[] { 2, -1 } : null;
+			}
+			case PcodeOp.COPY, PcodeOp.CAST -> {
+				return extended(def.getInput(0), depth + 1);
+			}
+			case PcodeOp.MULTIEQUAL -> {
+				int[] result = null;
+				for (int i = 0; i < def.getNumInputs(); i++) {
+					int[] in = extended(def.getInput(i), depth + 1);
+					if (in == null) {
+						return null;
+					}
+					result = result == null ? in
+							: new int[] { Math.max(result[0], in[0]), result[1] + in[1] };
+				}
+				return result;
+			}
+			default -> {
+				return null;
+			}
+		}
+	}
+
 	/** The type the decompiler gives a value, an integer with the signedness its uses show */
 	static DataType of(HighVariable high) {
 		if (high == null) {

@@ -141,7 +141,9 @@ each with an option:
   start pattern. A gap after a return or unconditional branch becomes functions when all of
   it decodes as complete subroutines that stay in the gap, use no `se_illegal` and none of
   the instructions typical of data decoded as code that the program does not otherwise use.
-  Each such function gets an analysis bookmark.
+  An empty handler, a single `se_blr` between two functions, is too short for that rule;
+  it becomes a function when a word of flash next to a pointer to a function points to it,
+  as the entries of a table of handlers do. Each such function gets an analysis bookmark.
 - **Calling conventions for kept registers** (`E200KeptRegisters.java`): e200 compilers
   know which volatile registers (r0, r3-r12) the functions they compile change, and keep
   values in the others across calls, which the decompiler showed as `extraout_` variables.
@@ -205,12 +207,34 @@ decompiles every function and is the longest part of the analysis):
   `byte *`; a pointer indexed with several strides, as the data of a lookup table whose
   element type a field selects, is a `void *`; and a group with a place that gets a
   constant that is no address (an error code passed where other callers pass a pointer)
-  gets no structure. Data that code passes as a pointer to such a structure, as a map
-  descriptor in flash passed to a lookup function, gets the structure where only single
-  values at its fields are there, and the data its pointer fields point to gets the
-  pointed-to type (a byte for a `void *`; all of flash is executable in an image, and the
-  reference analysis would disassemble an undefined target): `lookup(&P_50800274_092923ec,
-  x)` instead of `lookup((P_50800274 *)&USHORT_092923ec, x)`.
+  gets no structure, and no pointer type. The places that are passed the address of the same
+  global, as the parameters of the functions that initialize, run and read one module's
+  instance, point to data of one layout: their groups are one group, with one structure,
+  where their shapes fit together (fields that overlap are the same field, or bytes of it).
+  The instances that code passes by address bound the structure's length, since none holds
+  another: a lookup function reads the scale and offset of a map descriptor whether or not
+  the descriptor has them, and the curve descriptors 12 bytes apart give a structure of 12
+  bytes, so that `lookup(&P_50800274_0928b4b4, x)` needs no cast at the hundreds of calls
+  and the two fields past the end show in the one function that reads them. Where the data at
+  the instances is in smaller pieces than a field, as the `byte` that code reads where a
+  function writes a `ushort` of the value and its complement, the structure has the pieces as
+  fields and the function writes it as a whole. Data that code passes as a pointer to such a
+  structure, as a map descriptor in flash passed to a lookup function, gets the structure
+  where only single values at its fields are there (an integer over whole integer fields, or
+  a byte of one, counts), and the data its pointer fields point to gets the pointed-to type
+  (a byte for a `void *`; all of flash is executable in an image, and the reference analysis
+  would disassemble an undefined target): `lookup(&P_50800274_092923ec, x)` instead of
+  `lookup((P_50800274 *)&USHORT_092923ec, x)`. A constant that is an address in RAM or flash,
+  passed where a pointer to a type is expected, gets data of that type there, so that the
+  decompiler shows `&USHORT_4000d178` instead of `(ushort *)0x4000d178`.
+- **Pointers to functions** (`E200FunctionPointers.java`): a pointer in flash, an element of
+  an array of pointers or a pointer field of a structure whose values are all entry points of
+  functions (or null) gets a pointer to a function definition: the functions' signature where
+  they all have the same, otherwise one with the number of parameters most of them have
+  (the handlers in a table are called alike), as long as it is plausible for C (a
+  hand-written routine that reads all the argument registers gets eight from Decompiler
+  Parameter ID). Handlers called through tables then decompile as
+  `(*tbl_08fab6f4[i].f4)(x)` instead of `(*(code *)tbl_08fab6f4[i].f4)(x)`.
 - **Signedness and width of integers** (`E200Integers.java`): the decompiler infers integer
   types before it removes dead code, and `se_cmp`, `se_cmpi` and `e_cmpi`, which compilers
   also use to test for equality, set the less and greater bits with signed comparisons, so
@@ -220,7 +244,9 @@ decompiles every function and is the longest part of the analysis):
   value without either is unsigned. Integers that analysis typed get the signedness of the
   uses of their group. A parameter that the callee masks or truncates to one or two bytes
   before every use (`param_1 & 0xff`) is a `byte` or `ushort` (Decompiler Parameter ID gives
-  it the register's four bytes), and so is a return value that every caller uses so.
+  it the register's four bytes), and so is a return value that every caller uses so, or
+  that the function itself extends from a byte or halfword on every return (`return
+  (uint)BYTE_4000e5d8;` returns a `byte`, whatever the callers do with the register).
 - New types change the decompiled code of the functions that use them, so the analyzer
   decompiles again those that still use undefined places or table fields, or use a place
   now typed as a pointer (which shows the data it points to), three rounds at most, and
@@ -268,19 +294,22 @@ decompiled, per image:
 
 | | Mean | Range |
 |---|---|---|
-| Functions | 14,427 | 13,891-14,918 |
-| Instructions | 445,380 | 418,579-464,539 |
+| Functions | 14,488 | 13,954-14,978 |
+| Instructions | 446,148 | 419,347-465,307 |
 | Decompiler failures | 0 | 0 |
-| Functions with decompiler warnings | 86 | 83-89 |
-| Functions with `undefined` in their signature | 246 | 246 |
-| Functions with `extraout_` variables | 7 | 7 |
-| `undefinedN` in the C | 2,998 | 2,767-3,126 |
-| `DAT_` references in the C | 1,199 | 1,140-1,231 |
-| Analysis time (2 CPUs) | 126 s | 118-131 s |
+| Functions with decompiler warnings | 93 | 90-96 |
+| Functions with `undefined` in their signature | 33 | 33 |
+| Functions with `extraout_` variables | 31 | 30-31 |
+| `undefinedN` in the C | 1,338 | 1,331-1,344 |
+| `DAT_` references in the C | 476 | 468-485 |
+| Pointer casts in the C | 4,850 | 4,650-4,990 |
+| Calls through `(code *)` casts | 119 | 119-120 |
+| Analysis time (2 CPUs) | 253 s | 237-270 s |
 
 Most decompiler warnings are about infinite loops (halt loops) and unreachable blocks the
-decompiler removes. The data types step takes 37% of the analysis time, Decompiler
-Parameter ID 20%.
+decompiler removes; the `extraout_` and `undefined` signatures are in hand-written
+startup and core self-test code. The data types step takes most of the analysis time,
+Decompiler Parameter ID about a fifth.
 
 ## Installation
 

@@ -268,6 +268,11 @@ final class E200DataTypes {
 						new HashSet<>(), false, passed, tables, typed, monitor);
 				}
 			}
+			int functionPointers = E200FunctionPointers.apply(program, monitor);
+			if (functionPointers > 0) {
+				Msg.info(E200Analyzer.class, "Typed " + functionPointers +
+					" pointers, array elements and structure fields in flash that point to functions");
+			}
 			if (typed[6] > 0) {
 				Msg.info(E200Analyzer.class, "Created " + typed[6] +
 					" arrays and arrays of structures that code indexes");
@@ -335,6 +340,9 @@ final class E200DataTypes {
 					typable.add(use.address());
 				}
 				typable.addAll(result.facts().globals());
+				for (Map.Entry<E200TypeFlow.Slot, Address> p : result.facts().pointees) {
+					typable.add(p.getValue());
+				}
 			}
 		}
 		Map<Address, List<DataType>> uses = new HashMap<>();
@@ -760,7 +768,7 @@ final class E200DataTypes {
 	 * structure, where there are only single values there, at fields of their size; returns
 	 * whether it did
 	 */
-	private static boolean structureAt(Program program, Address address, Structure s) {
+	static boolean structureAt(Program program, Address address, Structure s) {
 		Listing listing = program.getListing();
 		MemoryBlock block = program.getMemory().getBlock(address);
 		if (block == null || block.isVolatile() ||
@@ -788,10 +796,14 @@ final class E200DataTypes {
 			if (!E200Tables.primitive(t) || d.getMaxAddress().compareTo(end) > 0) {
 				return false;
 			}
-			DataTypeComponent c = s.getComponentAt((int) d.getAddress().subtract(address));
-			if (!Undefined.isUndefined(t) && (c == null ||
-				c.getDataType() instanceof DefaultDataType || c.getLength() != d.getLength())) {
-				return false; // a value that is not a field
+			int offset = (int) d.getAddress().subtract(address);
+			DataTypeComponent c = s.getComponentAt(offset);
+			if (!Undefined.isUndefined(t) && !integerOverFields(s, offset, d.getLength(), t) &&
+				(c == null || c.getDataType() instanceof DefaultDataType ||
+					c.getLength() != d.getLength() &&
+						!(c.getLength() > d.getLength() &&
+							E200Integers.integer(c.getDataType()) && E200Integers.integer(t)))) {
+				return false; // a value that is not a field, nor bytes of integer fields
 			}
 		}
 		try {
@@ -802,6 +814,31 @@ final class E200DataTypes {
 			return false;
 		}
 		targets(program, listing.getDataAt(address), 0);
+		return true;
+	}
+
+	/**
+	 * Whether an integer of {@code length} bytes at {@code offset} in a structure covers whole
+	 * fields that are integers or undefined, as a halfword that code writes over a byte and
+	 * its complement does
+	 */
+	private static boolean integerOverFields(Structure s, int offset, int length, DataType t) {
+		if (!E200Integers.integer(t) || offset + length > s.getLength()) {
+			return false;
+		}
+		DataTypeComponent first = s.getComponentAt(offset);
+		if (first == null || first.getOffset() != offset) {
+			return false;
+		}
+		for (DataTypeComponent c : s.getComponents()) {
+			if (c.getOffset() >= offset && c.getOffset() < offset + length) {
+				DataType ct = c.getDataType();
+				if (c.getOffset() + c.getLength() > offset + length ||
+					!(Undefined.isUndefined(ct) || E200Integers.integer(ct))) {
+					return false;
+				}
+			}
+		}
 		return true;
 	}
 
@@ -909,7 +946,9 @@ final class E200DataTypes {
 
 	private static List<Use> globalUses(HighFunction high) {
 		List<Use> uses = new ArrayList<>();
-		Listing listing = high.getFunction().getProgram().getListing();
+		Program program = high.getFunction().getProgram();
+		FunctionManager functions = program.getFunctionManager();
+		Listing listing = program.getListing();
 		Iterator<HighSymbol> it = high.getGlobalSymbolMap().getSymbols();
 		while (it.hasNext()) {
 			HighSymbol symbol = it.next();
@@ -928,8 +967,7 @@ final class E200DataTypes {
 				}
 			}
 		}
-		AddressSpace space =
-			high.getFunction().getProgram().getAddressFactory().getDefaultAddressSpace();
+		AddressSpace space = program.getAddressFactory().getDefaultAddressSpace();
 		long max = space.getMaxAddress().getOffset();
 		Iterator<PcodeOpAST> ops = high.getPcodeOps();
 		while (ops.hasNext()) {
@@ -943,6 +981,29 @@ final class E200DataTypes {
 					for (DataType type : pointedTo(high, op.getOutput())) {
 						uses.add(new Use(space.getAddress(target), type, type.getLength(),
 							Access.ADDRESS));
+					}
+				}
+				continue;
+			}
+			if (opcode == PcodeOp.CALL) {
+				// a constant that is an address, passed where a pointer to a type is expected,
+				// as f((ushort *)0x40001234) where nothing is defined at the address yet
+				Function callee = E200TypeFlow.callee(functions, op);
+				for (int i = 1; callee != null && i < op.getNumInputs() &&
+					i - 1 < callee.getParameterCount(); i++) {
+					Varnode arg = op.getInput(i);
+					for (int depth = 0; arg != null && !arg.isConstant() && depth < 3; depth++) {
+						PcodeOp def = arg.getDef();
+						arg = def != null && (def.getOpcode() == PcodeOp.CAST ||
+							def.getOpcode() == PcodeOp.COPY) ? def.getInput(0) : null;
+					}
+					if (arg != null && arg.isConstant()) { // not the address of a symbol
+						Address address = E200TypeFlow.addressOf(program, arg, 0);
+						DataType parameter = callee.getParameter(i - 1).getDataType();
+						if (address != null && pointsToValue(parameter)) {
+							DataType type = ((Pointer) parameter).getDataType();
+							uses.add(new Use(address, type, type.getLength(), Access.ADDRESS));
+						}
 					}
 				}
 				continue;
