@@ -765,7 +765,7 @@ final class E200TypeFlow {
 				int v = w == null ? 0 : w.width;
 				if (w != null) {
 					for (Slot dep : w.deps) {
-						v = Math.max(v, width(program, dep, resolved));
+						v = Math.max(v, width(program, dep, resolved, complete, untypedReturns));
 					}
 				}
 				if (v == 0) {
@@ -786,11 +786,7 @@ final class E200TypeFlow {
 		Set<Slot> narrowed = new HashSet<>();
 		for (Slot s : all) {
 			int width = resolved.get(s);
-			DataType current = current(program, s);
-			if (width == 0 || width > 2 || current == null || current.getLength() != 4 ||
-				current instanceof TypeDef ||
-				!E200Integers.integer(current) && !Undefined.isUndefined(current) ||
-				s instanceof Return r && untypedReturns.contains(r.function())) {
+			if (width == 0 || width > 2 || !narrowable(program, s, complete, untypedReturns)) {
 				continue;
 			}
 			narrowed.add(s);
@@ -832,10 +828,11 @@ final class E200TypeFlow {
 	/**
 	 * The width of the value in a place that a value is passed to or returned from: that of
 	 * its type if it is a byte or halfword already, else the width its own uses and callers
-	 * give it, or 4 if there is no such place or nothing narrows it: it stays four bytes
-	 * wide, and the whole register is passed to it
+	 * give it if that can be set, or 4 if there is no such place or it stays four bytes
+	 * wide, when the whole register is passed to it
 	 */
-	private static int width(Program program, Slot dep, Map<Slot, Integer> resolved) {
+	private static int width(Program program, Slot dep, Map<Slot, Integer> resolved,
+			Set<Function> complete, Set<Address> untypedReturns) {
 		DataType current = current(program, dep);
 		if (current == null) {
 			return 4;
@@ -845,7 +842,31 @@ final class E200TypeFlow {
 			return current.getLength();
 		}
 		Integer w = resolved.get(dep);
-		return w == null || w == 0 ? 4 : w;
+		if (w == null || w == 0 || w > 2 || !narrowable(program, dep, complete, untypedReturns)) {
+			return 4;
+		}
+		return w;
+	}
+
+	/**
+	 * Whether a place of four bytes may be narrowed: its type is an integer or undefined
+	 * that analysis may set, all the callers of its function were decompiled, and it is not
+	 * the return value of a function not known to return anything
+	 */
+	private static boolean narrowable(Program program, Slot s, Set<Function> complete,
+			Set<Address> untypedReturns) {
+		DataType current = current(program, s);
+		if (current == null || current.getLength() != 4 || current instanceof TypeDef ||
+			!E200Integers.integer(current) && !Undefined.isUndefined(current) ||
+			s instanceof Return r && untypedReturns.contains(r.function())) {
+			return false;
+		}
+		if (s instanceof Global) {
+			return false;
+		}
+		Function f = function(program, s);
+		return f != null && complete.contains(f) && !f.isThunk() &&
+			!f.getSignatureSource().isHigherPriorityThan(SourceType.ANALYSIS);
 	}
 
 	/** Whether a group has a pointer to a structure, union or array of its own */

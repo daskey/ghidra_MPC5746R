@@ -820,8 +820,9 @@ final class E200DataTypes {
 
 	/**
 	 * Gives the data at an address that code passes as a pointer to a structure that
-	 * structure, where there are only single values there, at fields of their size; returns
-	 * whether it did
+	 * structure, where there are only single values there, at fields of their size, or
+	 * structures of the analyzer's that lie inside it (the larger structure wins, whichever
+	 * is applied first); returns whether it did
 	 */
 	static boolean structureAt(Program program, Address address, Structure s) {
 		Listing listing = program.getListing();
@@ -839,7 +840,7 @@ final class E200DataTypes {
 		}
 		Data at = listing.getDataContaining(address);
 		if (!block.contains(end) || at != null && (!at.getAddress().equals(address) ||
-			!E200Tables.primitive(at.getDataType()))) {
+			!E200Tables.primitive(at.getDataType()) && !smallerStructure(at, s))) {
 			return false;
 		}
 		AddressSet range = new AddressSet(address, end);
@@ -848,7 +849,13 @@ final class E200DataTypes {
 		}
 		for (Data d : listing.getDefinedData(range, true)) {
 			DataType t = d.getDataType();
-			if (!E200Tables.primitive(t) || d.getMaxAddress().compareTo(end) > 0) {
+			if (d.getMaxAddress().compareTo(end) > 0) {
+				return false;
+			}
+			if (smallerStructure(d, s)) {
+				continue; // a structure of the analyzer's inside this one: the larger wins
+			}
+			if (!E200Tables.primitive(t)) {
 				return false;
 			}
 			int offset = (int) d.getAddress().subtract(address);
@@ -870,6 +877,11 @@ final class E200DataTypes {
 		}
 		targets(program, listing.getDataAt(address), 0);
 		return true;
+	}
+
+	/** Whether data is a structure of the analyzer's shorter than {@code s} */
+	private static boolean smallerStructure(Data d, Structure s) {
+		return E200Tables.ownStructure(d.getDataType()) && d.getLength() < s.getLength();
 	}
 
 	/**

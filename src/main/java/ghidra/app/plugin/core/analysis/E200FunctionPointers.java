@@ -284,7 +284,9 @@ final class E200FunctionPointers {
 				parameters.add(new ArrayList<>());
 			}
 			List<DataType> returns = new ArrayList<>();
-			for (Function f : targets) {
+			List<Function> sorted = new ArrayList<>(targets); // named after the lowest
+			sorted.sort(Comparator.comparing(Function::getEntryPoint));
+			for (Function f : sorted) {
 				if (f.getParameterCount() != parameterCount) {
 					same = false;
 					continue;
