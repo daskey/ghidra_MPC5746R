@@ -67,7 +67,10 @@ the bases changed. It schedules the peripherals, functions and data types steps 
 analysis, after Decompiler Parameter ID, for the functions with new or changed code and
 those it has not seen. Each step leaves what is already marked up as it is, so running
 analysis again, or the analyzer on a selection with **Analysis > One Shot**, redoes only
-what changed.
+what changed. The steps share three helper classes: `E200Code.java` (executable memory,
+what instructions read and write, what p-code says about values), `E200Data.java` (the
+data of the listing: replacing data, labels, structures at data, the data pointers point
+to) and `E200Types.java` (the data types the analysis chooses and makes).
 
 ### Entry points
 
@@ -160,14 +163,19 @@ Signatures set by the user or an import are left alone.
 
 ### Data types
 
-`E200DataTypes.java` and `E200TypeFlow.java` type global data, parameters and return values
+`E200DataTypes.java` is the step that types global data, parameters and return values
 that are still `undefined1`, `undefined2`, `undefined4`, ... after Decompiler Parameter ID,
 from what the decompiler infers in all functions (option **Infer data types**; this
-decompiles every function and is the longest part of the analysis):
-- **Globals from their uses**: a value used by `efs*` instructions is a `float`, one that is
-  sign extended is signed, one that is dereferenced is a pointer. A type is applied only
-  when the uses agree, except that a `float` wins over integers of its size and integers
-  that differ in signedness go to a clear majority. Single bytes become `byte` or `sbyte`.
+decompiles every function and is the longest part of the analysis). It decompiles the
+functions, runs the parts below in rounds and logs what they did:
+- **Globals from their uses** (`E200GlobalUses.java`): a value used by `efs*` instructions
+  is a `float`, one that is sign extended is signed, one that is dereferenced is a pointer.
+  A type is applied only when the uses agree, except that a `float` wins over integers of
+  its size and integers that differ in signedness go to a clear majority. Single bytes
+  become `byte` or `sbyte`. Addresses used as pointers to a type get data of that type, as
+  in `FUN_08faf3e0(&SHORT_09294ba0, x)`, also where the reference analysis left undefined
+  data of another size at an address an instruction only forms, as long as nothing accesses
+  that data as it is.
 - **Arrays and tables** (`E200Tables.java`): code reads an element of a global array at the
   array's address plus the index times a stride, and a field of an array of structures at
   the field's address in the first element plus the index times the structure size. The
@@ -188,12 +196,10 @@ decompiles every function and is the longest part of the analysis):
   the analyzer made for a parameter it is passed as, and the data it points to gets the
   pointed-to type: Ghidra's reference analysis would otherwise take an undefined target for
   a pointer if its value is an address, as the float 2.0 (0x40000000, the start of SRAM)
-  is, or for code. Addresses used as pointers to a type get data of that type, as in
-  `FUN_08faf3e0(&SHORT_09294ba0, x)`, also where the reference analysis left undefined data
-  of another size at an address an instruction only forms, as long as nothing accesses that
-  data as it is.
-- **Values passed between functions**: a function that only stores, passes on or returns a
-  value gives it no type, but the value has one where it comes from or goes to. Globals,
+  is, or for code.
+- **Values passed between functions** (`E200TypeFlow.java`): a function that only stores,
+  passes on or returns a value gives it no type, but the value has one where it comes from
+  or goes to. Globals,
   parameters and return values are linked where decompiled code copies a value from one to
   another, and each group of linked places gets the type all their uses agree on. A
   parameter or return value is typed only when all callers of its function were decompiled.

@@ -23,11 +23,10 @@ import ghidra.program.model.address.*;
 import ghidra.program.model.data.*;
 import ghidra.program.model.listing.*;
 import ghidra.program.model.mem.*;
-import ghidra.program.model.symbol.*;
+import ghidra.program.model.symbol.SourceType;
 import ghidra.program.model.util.CodeUnitInsertionException;
 import ghidra.util.Msg;
 import ghidra.util.exception.CancelledException;
-import ghidra.util.exception.InvalidInputException;
 import ghidra.util.task.TaskMonitor;
 
 /**
@@ -105,7 +104,7 @@ final class E200EntryPoints {
 				findBootHeaders(program, block);
 			}
 		}
-		for (AddressRange range : E200Analyzer.executableMemory(program)) {
+		for (AddressRange range : E200Code.executableMemory(program)) {
 			findVectorTables(program, range, monitor);
 		}
 	}
@@ -160,7 +159,7 @@ final class E200EntryPoints {
 				// something is already defined there
 			}
 		}
-		label(program, header, "boot_header");
+		E200Data.label(program, header, "boot_header", SourceType.ANALYSIS);
 
 		AutoAnalysisManager manager = AutoAnalysisManager.getAnalysisManager(program);
 		for (int i = 0; i < VECTOR_COUNT; i++) {
@@ -169,7 +168,8 @@ final class E200EntryPoints {
 				program.getFunctionManager().getFunctionAt(vector) != null) {
 				continue; // no vector, the same as an earlier core's, or marked up already
 			}
-			label(program, vector, distinct.size() == 1 ? "reset" : "reset_" + i);
+			E200Data.label(program, vector, distinct.size() == 1 ? "reset" : "reset_" + i,
+				SourceType.ANALYSIS);
 			program.getSymbolTable().addExternalEntryPoint(vector);
 			manager.disassemble(vector);
 			manager.createFunction(vector, false);
@@ -268,7 +268,7 @@ final class E200EntryPoints {
 		boolean marked = false;
 		for (int i = 0; i < handlers.size(); i++) {
 			Address vector = table.add(i * VECTOR_SPACING);
-			label(program, vector, IVORS[i]);
+			E200Data.label(program, vector, IVORS[i], SourceType.ANALYSIS);
 			if (listing.getInstructionAt(vector) == null) {
 				manager.disassemble(vector);
 				marked = true;
@@ -283,20 +283,6 @@ final class E200EntryPoints {
 		if (marked) {
 			Msg.info(E200Analyzer.class, "Interrupt vector table at " + table + ": " +
 				handlers.size() + " vectors");
-		}
-	}
-
-	private static void label(Program program, Address address, String name) {
-		SymbolTable symbols = program.getSymbolTable();
-		Symbol primary = symbols.getPrimarySymbol(address);
-		if (primary != null && primary.getSource() != SourceType.DEFAULT) {
-			return;
-		}
-		try {
-			symbols.createLabel(address, name, SourceType.ANALYSIS);
-		}
-		catch (InvalidInputException e) {
-			// not a valid name
 		}
 	}
 }

@@ -32,11 +32,10 @@ import ghidra.program.model.address.*;
 import ghidra.program.model.data.*;
 import ghidra.program.model.listing.*;
 import ghidra.program.model.mem.*;
-import ghidra.program.model.symbol.*;
+import ghidra.program.model.symbol.SourceType;
 import ghidra.program.model.util.CodeUnitInsertionException;
 import ghidra.util.Msg;
 import ghidra.util.exception.CancelledException;
-import ghidra.util.exception.InvalidInputException;
 import ghidra.util.task.TaskMonitor;
 
 /**
@@ -215,7 +214,7 @@ final class E200Peripherals {
 				catch (CodeUnitInsertionException e) {
 					continue;
 				}
-				label(first, p.name());
+				E200Data.label(program, first, p.name(), SourceType.IMPORTED);
 			}
 			int pointers = typeBaseAddressTables(typesAt, monitor);
 			if (typed > 0 || pointers > 0) {
@@ -730,14 +729,10 @@ final class E200Peripherals {
 			return dtm.resolve(bits, DataTypeConflictHandler.KEEP_HANDLER);
 		}
 
+		/** The unsigned integer of a register's size, or undefined bytes for an unusual size */
 		private static DataType integerType(int size) {
-			return switch (size) {
-				case 1 -> ByteDataType.dataType;
-				case 2 -> UnsignedShortDataType.dataType;
-				case 4 -> UnsignedIntegerDataType.dataType;
-				case 8 -> UnsignedLongLongDataType.dataType;
-				default -> Undefined.getUndefinedDataType(size);
-			};
+			DataType integer = E200Types.unsigned(size);
+			return integer != null ? integer : Undefined.getUndefinedDataType(size);
 		}
 
 		/** A type name not used yet for this device: {@code name_Type}, or with a number. */
@@ -783,20 +778,6 @@ final class E200Peripherals {
 
 		private static String trimUnderscores(String name) {
 			return name.replaceAll("^_+|_+$", "");
-		}
-
-		private void label(Address address, String name) {
-			SymbolTable symbols = program.getSymbolTable();
-			Symbol primary = symbols.getPrimarySymbol(address);
-			if (primary != null && primary.getSource() != SourceType.DEFAULT) {
-				return;
-			}
-			try {
-				symbols.createLabel(address, name, SourceType.IMPORTED);
-			}
-			catch (InvalidInputException e) {
-				// not a valid name
-			}
 		}
 	}
 }

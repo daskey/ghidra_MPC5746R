@@ -57,8 +57,6 @@ import ghidra.util.task.TaskMonitor;
  */
 final class E200ConstantPropagation extends ConstantPropagationAnalyzer {
 
-	private static final String PROCESSOR_NAME = "PowerPC e200";
-
 	private static final String SWITCH_OPTION_NAME = "Switch Table Recovery";
 	private static final String SWITCH_OPTION_DESCRIPTION = "Turn on to recover switch tables";
 	private static final boolean SWITCH_OPTION_DEFAULT_VALUE = true;
@@ -83,7 +81,7 @@ final class E200ConstantPropagation extends ConstantPropagationAnalyzer {
 	private boolean recoverSwitchTables = SWITCH_OPTION_DEFAULT_VALUE;
 
 	public E200ConstantPropagation() {
-		super(PROCESSOR_NAME);
+		super(E200Analyzer.NAME);
 	}
 
 	@Override
@@ -178,7 +176,7 @@ final class E200ConstantPropagation extends ConstantPropagationAnalyzer {
 			if (next.getMnemonicString().equals("e_add2is")) {
 				return rD.equals(next.getRegister(0)) && next.getScalar(1) != null ? next : null;
 			}
-			if (E200Analyzer.writes(next, rD)) {
+			if (E200Code.writes(next, rD)) {
 				return null;
 			}
 		}
@@ -200,7 +198,7 @@ final class E200ConstantPropagation extends ConstantPropagationAnalyzer {
 			for (Instruction instruction : program.getListing()
 					.getInstructions(new AddressSet(change.range()), true)) {
 				monitor.checkCancelled();
-				if (!reads(instruction, change.register())) {
+				if (!E200Code.reads(instruction, change.register())) {
 					continue;
 				}
 				instructions.add(instruction.getMinAddress(), instruction.getMaxAddress());
@@ -215,15 +213,6 @@ final class E200ConstantPropagation extends ConstantPropagationAnalyzer {
 			}
 		}
 		return instructions;
-	}
-
-	private static boolean reads(Instruction instruction, Register register) {
-		for (Object input : instruction.getInputObjects()) {
-			if (input instanceof Register r && r.getBaseRegister().equals(register)) {
-				return true;
-			}
-		}
-		return false;
 	}
 
 	/** Whether a signed 16-bit displacement from a base reaches an address */

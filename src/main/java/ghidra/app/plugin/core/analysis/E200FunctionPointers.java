@@ -24,7 +24,6 @@ import ghidra.program.model.mem.MemoryBlock;
 import ghidra.program.model.pcode.PcodeOp;
 import ghidra.program.model.pcode.Varnode;
 import ghidra.program.model.scalar.Scalar;
-import ghidra.program.model.util.CodeUnitInsertionException;
 import ghidra.util.InvalidNameException;
 import ghidra.util.exception.CancelledException;
 import ghidra.util.task.TaskMonitor;
@@ -45,8 +44,6 @@ import ghidra.util.task.TaskMonitor;
  */
 final class E200FunctionPointers {
 
-	/** Category of the function definitions */
-	private static final CategoryPath CATEGORY = E200Tables.CATEGORY;
 	/**
 	 * Parameters a function pointed to may have: a hand-written routine that reads all the
 	 * argument registers gets eight from Decompiler Parameter ID, and a definition with them
@@ -85,7 +82,7 @@ final class E200FunctionPointers {
 				DataType type = data.getDataType();
 				if (type instanceof Array array) {
 					DataType element = array.getDataType();
-					if (E200Tables.ownStructure(element)) {
+					if (E200Types.ownStructure(element)) {
 						for (int i = 0; i < data.getNumComponents(); i++) {
 							instances.computeIfAbsent((Structure) element, s -> new ArrayList<>())
 									.add(data.getComponent(i));
@@ -104,7 +101,7 @@ final class E200FunctionPointers {
 						}
 					}
 				}
-				else if (E200Tables.ownStructure(type)) {
+				else if (E200Types.ownStructure(type)) {
 					instances.computeIfAbsent((Structure) type, s -> new ArrayList<>()).add(data);
 				}
 				else if (untypedPointer(type)) {
@@ -119,7 +116,7 @@ final class E200FunctionPointers {
 		}
 		for (Map.Entry<Address, DataType> e : replacements.entrySet()) {
 			monitor.checkCancelled();
-			if (replace(listing, listing.getDefinedDataAt(e.getKey()), e.getValue())) {
+			if (E200Data.replace(listing, e.getKey(), e.getValue())) {
 				typed++;
 			}
 		}
@@ -248,14 +245,39 @@ final class E200FunctionPointers {
 			this.program = program;
 			this.manager = program.getDataTypeManager();
 			this.signedChar = manager.getDataOrganization().isSignedChar();
-			Category category = manager.getCategory(CATEGORY);
+			Category category = manager.getCategory(E200Types.CATEGORY);
 			if (category != null) {
-				for (DataType t : category.getDataTypes()) {
+				// the first by name of the definitions of one prototype, whatever the order the
+				// category lists them in
+				List<DataType> existing = new ArrayList<>(List.of(category.getDataTypes()));
+				existing.sort(Comparator.comparing(DataType::getName));
+				for (DataType t : existing) {
 					if (t instanceof FunctionDefinition d) {
 						byPrototype.putIfAbsent(key(d), d);
 					}
 				}
 			}
+		}
+
+		/**
+		 * The definition for a place that holds pointers to {@code targets} (the entry points
+		 * of functions) or that code calls through ({@code calls}): from the functions where
+		 * there are any, they agree and the calls fit, else from the calls; null if neither
+		 * gives one
+		 */
+		FunctionDefinition of(Collection<Address> targets, Collection<Call> calls) {
+			List<Function> functions = new ArrayList<>();
+			for (Address a : targets) {
+				Function f = program.getFunctionManager().getFunctionAt(a);
+				if (f != null) {
+					functions.add(f.isThunk() ? f.getThunkedFunction(true) : f);
+				}
+			}
+			FunctionDefinition definition = forTargets(functions);
+			if (definition != null && fits(definition, calls)) {
+				return definition;
+			}
+			return forCalls(calls);
 		}
 
 		/**
@@ -271,7 +293,7 @@ final class E200FunctionPointers {
 			for (Function f : targets) {
 				counts.add(f.getParameterCount());
 			}
-			int parameterCount = E200DataTypes.mostFrequent(counts);
+			int parameterCount = E200Types.mostFrequent(counts);
 			if (parameterCount > MAX_PARAMETERS ||
 				Collections.frequency(counts, parameterCount) * 2 <= targets.size() &&
 					Collections.frequency(counts, parameterCount) < targets.size()) {
@@ -303,7 +325,7 @@ final class E200FunctionPointers {
 				returns.add(f.getReturnType());
 			}
 			if (same) {
-				return add(new FunctionDefinitionDataType(CATEGORY,
+				return add(new FunctionDefinitionDataType(E200Types.CATEGORY,
 					"F_" + first.getEntryPoint().toString(false), first.getSignature(), manager));
 			}
 			return definition(parameters, returns);
@@ -322,7 +344,7 @@ final class E200FunctionPointers {
 			for (Call c : calls) {
 				counts.add(c.sizes().length);
 			}
-			int parameterCount = E200DataTypes.mostFrequent(counts);
+			int parameterCount = E200Types.mostFrequent(counts);
 			if (parameterCount > MAX_PARAMETERS) {
 				return null;
 			}
@@ -331,7 +353,6 @@ final class E200FunctionPointers {
 				parameters.add(new ArrayList<>());
 			}
 			List<DataType> returns = new ArrayList<>();
-			boolean returns1 = false;
 			for (Call c : calls) {
 				if (c.sizes().length != parameterCount) {
 					continue;
@@ -342,13 +363,12 @@ final class E200FunctionPointers {
 							: Undefined.getUndefinedDataType(c.sizes()[i]));
 				}
 				if (c.returns()) {
-					returns1 = true;
 					DataType t = c.resultType();
 					returns.add(t != null && t.getLength() == c.resultSize() ? t
 							: Undefined.getUndefinedDataType(c.resultSize()));
 				}
 			}
-			if (!returns1) {
+			if (returns.isEmpty()) {
 				returns.add(VoidDataType.dataType);
 			}
 			return definition(parameters, returns);
@@ -380,7 +400,7 @@ final class E200FunctionPointers {
 				return null;
 			}
 			FunctionDefinitionDataType definition =
-				new FunctionDefinitionDataType(CATEGORY, "F", manager);
+				new FunctionDefinitionDataType(E200Types.CATEGORY, "F", manager);
 			definition.setArguments(arguments);
 			definition.setReturnType(returned);
 			StringBuilder name = new StringBuilder("F_").append(typeName(returned));
@@ -410,14 +430,14 @@ final class E200FunctionPointers {
 				if (t == null || t.getLength() != size) {
 					return null;
 				}
-				if (E200TypeFlow.informative(t)) {
+				if (E200Types.informative(t)) {
 					informative.add(t);
 				}
 			}
 			DataType type = informative.size() == types.size()
-					? E200DataTypes.chooseType(informative, signedChar, true)
+					? E200Types.chooseType(informative, signedChar, true)
 					: null;
-			return type != null ? type : E200DataTypes.unsigned(size);
+			return type != null ? type : E200Types.unsigned(size);
 		}
 
 		private static String typeName(DataType t) {
@@ -432,7 +452,7 @@ final class E200FunctionPointers {
 		 * have at the same position are of one size, and a call's result is one it returns,
 		 * of its size
 		 */
-		static boolean fits(FunctionDefinition d, Collection<Call> calls) {
+		private static boolean fits(FunctionDefinition d, Collection<Call> calls) {
 			ParameterDefinition[] arguments = d.getArguments();
 			for (Call c : calls) {
 				for (int i = 0; i < Math.min(arguments.length, c.sizes().length); i++) {
@@ -448,34 +468,14 @@ final class E200FunctionPointers {
 			return true;
 		}
 
-		/**
-		 * The definition for a place that holds pointers to {@code targets} (the entry points
-		 * of functions) or that code calls through ({@code calls}): from the functions where
-		 * there are any, they agree and the calls fit, else from the calls; null if neither
-		 * gives one
-		 */
-		FunctionDefinition of(Collection<Address> targets, Collection<Call> calls) {
-			List<Function> functions = new ArrayList<>();
-			for (Address a : targets) {
-				Function f = program.getFunctionManager().getFunctionAt(a);
-				if (f != null) {
-					functions.add(f.isThunk() ? f.getThunkedFunction(true) : f);
-				}
-			}
-			FunctionDefinition definition = forTargets(functions);
-			if (definition != null && fits(definition, calls)) {
-				return definition;
-			}
-			return forCalls(calls);
-		}
-
 		/** One definition per prototype, in the data type manager */
 		private FunctionDefinition add(FunctionDefinitionDataType definition) {
 			String key = key(definition);
 			FunctionDefinition existing = byPrototype.get(key);
 			if (existing == null) {
 				try {
-					definition.setName(manager.getUniqueName(CATEGORY, definition.getName()));
+					definition.setName(
+						manager.getUniqueName(E200Types.CATEGORY, definition.getName()));
 				}
 				catch (InvalidNameException e) {
 					return null;
@@ -494,21 +494,6 @@ final class E200FunctionPointers {
 				key.append(p.getDataType().getPathName()).append(',');
 			}
 			return key.toString();
-		}
-	}
-
-	/** Replaces a datum with one of the given type; returns whether it did */
-	private static boolean replace(Listing listing, Data data, DataType type) {
-		if (data == null || type.getLength() != data.getLength()) {
-			return false;
-		}
-		try {
-			listing.clearCodeUnits(data.getAddress(), data.getMaxAddress(), false);
-			listing.createData(data.getAddress(), type);
-			return true;
-		}
-		catch (CodeUnitInsertionException e) {
-			return false;
 		}
 	}
 }
