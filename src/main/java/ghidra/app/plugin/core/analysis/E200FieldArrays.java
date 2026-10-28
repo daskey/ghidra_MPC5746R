@@ -46,7 +46,9 @@ import ghidra.util.task.TaskMonitor;
  * ({@code f0 * f2 elements}). A pointer field whose element type the code chooses at run
  * time, casting the pointer to several types, gets at each instance the type whose size
  * fits the gap, and an integer field whose value says which size, at the instances where
- * one fits, is its selector ({@code element size by f10}). The comments of a structure
+ * one fits, is its selector ({@code element size by f10}); the sizes the code gives the
+ * selector's values, where it compares the selector with constants on the way to the casts,
+ * come with the structure ({@code element size by f10: 0=4, 4=1, 8=2}). The comments of a structure
  * built in an earlier analysis are used as they are. Stray instructions in the way, of no
  * function and with nothing flowing to them, are data that was disassembled, and where a
  * count field gives the length, so are the strings the string analysis made of the values.
@@ -63,7 +65,8 @@ final class E200FieldArrays {
 
 	private static final Pattern ELEMENTS =
 		Pattern.compile("\\bf([0-9a-f]+)(?: \\* f([0-9a-f]+))? elements\\b");
-	private static final Pattern SELECTOR = Pattern.compile("\\belement size by f([0-9a-f]+)\\b");
+	private static final Pattern SELECTOR = Pattern.compile(
+		"\\belement size by f([0-9a-f]+)(?::((?: [0-9a-f]+=[0-9]+,?)+))?");
 	private static final Pattern CASTS = Pattern.compile("\\bcast to ([^;]+)");
 
 	private E200FieldArrays() {
@@ -236,6 +239,16 @@ final class E200FieldArrays {
 				int offset = Integer.parseInt(m.group(1), 16);
 				if (integers.contains(offset)) {
 					selector = offset;
+					if (m.group(2) != null) {
+						// the sizes the code gives the selector's values (see E200Structures)
+						for (String entry : m.group(2).split(",")) {
+							String[] valueAndSize = entry.trim().split("=");
+							if (valueAndSize.length == 2) {
+								sizeBySelector.put(Long.parseLong(valueAndSize[0], 16),
+									Integer.parseInt(valueAndSize[1]));
+							}
+						}
+					}
 				}
 			}
 			for (Data instance : data) {
@@ -388,9 +401,9 @@ final class E200FieldArrays {
 			}
 			if (bestMapping != null) {
 				selector = bestOffset;
-				sizeBySelector.putAll(bestMapping);
+				bestMapping.forEach(sizeBySelector::putIfAbsent);
 			}
-			else {
+			else if (sizeBySelector.isEmpty()) {
 				selector = null;
 			}
 		}
