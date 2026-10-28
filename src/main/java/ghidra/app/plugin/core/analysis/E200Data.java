@@ -108,7 +108,7 @@ final class E200Data {
 			return false;
 		}
 		AddressSet range = new AddressSet(address, end);
-		if (!strayCode(program, range)) {
+		if (!strayCode(program, range) || passedInside(program, address, end)) {
 			return false;
 		}
 		for (Data d : listing.getDefinedData(range, true)) {
@@ -148,6 +148,29 @@ final class E200Data {
 		}
 		targets(program, listing.getDataAt(address), 0);
 		return true;
+	}
+
+	/**
+	 * Whether code passes an address after {@code address} and up to {@code end} as a pointer:
+	 * another object starts there, as the next descriptor does where a lookup's structure
+	 * holds the fields of a longer variant of the descriptor
+	 */
+	private static boolean passedInside(Program program, Address address, Address end) {
+		Address from = address.next();
+		if (from == null || from.compareTo(end) > 0) {
+			return false;
+		}
+		ReferenceManager references = program.getReferenceManager();
+		AddressIterator inside =
+			references.getReferenceDestinationIterator(new AddressSet(from, end), true);
+		while (inside.hasNext()) {
+			for (Reference ref : references.getReferencesTo(inside.next())) {
+				if (ref.getReferenceType() == RefType.PARAM) {
+					return true;
+				}
+			}
+		}
+		return false;
 	}
 
 	/**
