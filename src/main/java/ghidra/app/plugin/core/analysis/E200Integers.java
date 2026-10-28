@@ -16,8 +16,12 @@
 package ghidra.app.plugin.core.analysis;
 
 import java.util.Iterator;
+import java.util.Set;
 
+import ghidra.program.model.address.Address;
 import ghidra.program.model.data.*;
+import ghidra.program.model.listing.Function;
+import ghidra.program.model.listing.FunctionManager;
 import ghidra.program.model.pcode.*;
 
 /**
@@ -42,7 +46,8 @@ import ghidra.program.model.pcode.*;
  * before every use ({@code e_rlwinm r0,r3,0,24,31}), and Decompiler Parameter ID gives it the
  * register's four bytes: the decompiler shows {@code param_1 & 0xff} at each use, and casts
  * at each call. A parameter all of whose uses are such is one or two bytes wide, and so is a
- * return value that every caller uses so.
+ * return value that every caller uses so. A value that a function only passes on to another
+ * or returns, as the wrappers of AUTOSAR code do, has the width of the place it goes to.
  */
 final class E200Integers {
 
@@ -98,11 +103,21 @@ final class E200Integers {
 	}
 
 	/**
-	 * The width in bytes that the uses of a value of four bytes show: 1 or 2 if every use
-	 * masks it with 0xff or 0xffff or truncates it to that width, 0 if it has no use, else 4;
-	 * and through {@code evidence} the signedness evidence of the narrowed values
+	 * The width in bytes that the uses of a value of four bytes show: 1 or 2 if a use masks
+	 * it with 0xff or 0xffff or truncates it to that width and no use needs more, 4 if one
+	 * does, 0 if no use says; and through {@code evidence} the signedness evidence of the
+	 * narrowed values. Passing the value to a function or returning it says nothing by
+	 * itself: the value then has the width of the place it goes to, which is added to
+	 * {@code deps} for the caller to resolve. A comparison of the whole register is a wide
+	 * use: the decompiler would show the register's other bytes as an input.
 	 */
-	static int width(HighVariable high, int[] evidence) {
+	static int width(HighVariable high, int[] evidence, FunctionManager functions,
+			Address entry, Set<E200TypeFlow.Slot> deps) {
+		return width(high, evidence, functions, entry, deps, 0);
+	}
+
+	private static int width(HighVariable high, int[] evidence, FunctionManager functions,
+			Address entry, Set<E200TypeFlow.Slot> deps, int depth) {
 		if (high == null || high.getSize() != 4) {
 			return 4;
 		}
@@ -111,24 +126,65 @@ final class E200Integers {
 			Iterator<PcodeOp> uses = v.getDescendants();
 			while (uses.hasNext()) {
 				PcodeOp op = uses.next();
-				int w = 4;
-				if (op.getOpcode() == PcodeOp.INT_AND && op.getInput(1).isConstant()) {
-					long mask = op.getInput(1).getOffset();
-					w = mask == 0xff ? 1 : mask == 0xffff ? 2 : 4;
-				}
-				else if (op.getOpcode() == PcodeOp.SUBPIECE && op.getInput(0) == v &&
-					op.getInput(1).getOffset() == 0 && op.getOutput().getSize() <= 2) {
-					w = op.getOutput().getSize();
-					evidence[0] += evidence(op.getOutput().getHigh());
-				}
-				else if ((op.getOpcode() == PcodeOp.INDIRECT ||
-					op.getOpcode() == PcodeOp.MULTIEQUAL) && op.getOutput().getHigh() == high) {
+				Varnode out = op.getOutput();
+				if (out != null && out.getHigh() == high) {
 					continue; // within the variable
 				}
-				width = Math.max(width, w);
+				width = Math.max(width, width(op, v, evidence, functions, entry, deps, depth));
 			}
 		}
 		return width;
+	}
+
+	/** The width one use of {@code v} shows (see {@link #width}) */
+	private static int width(PcodeOp op, Varnode v, int[] evidence, FunctionManager functions,
+			Address entry, Set<E200TypeFlow.Slot> deps, int depth) {
+		Varnode out = op.getOutput();
+		switch (op.getOpcode()) {
+			case PcodeOp.INT_AND -> {
+				Varnode mask = op.getInput(0) == v ? op.getInput(1) : op.getInput(0);
+				if (mask.isConstant()) {
+					return mask.getOffset() == 0xff ? 1 : mask.getOffset() == 0xffff ? 2 : 4;
+				}
+			}
+			case PcodeOp.SUBPIECE -> {
+				if (op.getInput(0) == v && op.getInput(1).getOffset() == 0 &&
+					out.getSize() <= 2) {
+					evidence[0] += evidence(out.getHigh());
+					return out.getSize();
+				}
+			}
+			case PcodeOp.CALL -> {
+				Function callee = E200TypeFlow.callee(functions, op);
+				if (callee == null || callee.getParameterCount() != op.getNumInputs() - 1) {
+					return 4;
+				}
+				for (int i = 1; i < op.getNumInputs(); i++) {
+					if (op.getInput(i) == v) {
+						deps.add(new E200TypeFlow.Param(callee.getEntryPoint(), i - 1));
+					}
+				}
+				return 0;
+			}
+			case PcodeOp.RETURN -> {
+				if (entry != null && op.getNumInputs() > 1 && op.getInput(1) == v) {
+					deps.add(new E200TypeFlow.Return(entry));
+					return 0;
+				}
+			}
+			case PcodeOp.CAST, PcodeOp.COPY, PcodeOp.MULTIEQUAL, PcodeOp.INDIRECT -> {
+				// the value under another name, in a register or a temporary: what its uses
+				// show; in memory, a global or a local on the stack, the whole value is stored
+				if (depth < 3 && out != null && out.getSize() == 4 && out.getHigh() != null &&
+					(out.isRegister() || out.isUnique())) {
+					return width(out.getHigh(), evidence, functions, entry, deps, depth + 1);
+				}
+			}
+			default -> {
+				// needs the whole value: stored, computed with, extended, used as an address
+			}
+		}
+		return 4;
 	}
 
 	/**

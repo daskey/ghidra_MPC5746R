@@ -168,7 +168,7 @@ final class E200Tables {
 	 * The pointer type that the uses of a loaded untyped value cast it to, as in
 	 * {@code (float *)tbl[i].f4} or a call's {@code (S *)} parameter, if they agree
 	 */
-	private static DataType castTo(Varnode value) {
+	static DataType castTo(Varnode value) {
 		DataType type = null;
 		Iterator<PcodeOp> uses = value.getDescendants();
 		while (uses.hasNext()) {

@@ -370,7 +370,12 @@ final class E200DataTypes {
 					continue;
 				}
 				Data data = listing.getDefinedDataAt(use.address());
-				if (data == null) {
+				if (data == null || use.access() == Access.ADDRESS &&
+					Undefined.isUndefined(data.getDataType()) && use.type() != null &&
+					E200TypeFlow.informative(use.type()) &&
+					use.type().getLength() != data.getLength()) {
+					// no data, or undefined data of another size than the pointer's target, as
+					// the reference analysis makes of an address an instruction forms
 					undefined.computeIfAbsent(use.address(), a -> new ArrayList<>()).add(use);
 				}
 				else if (Undefined.isUndefined(data.getDataType()) &&
@@ -741,9 +746,10 @@ final class E200DataTypes {
 			}
 			try {
 				Address end = base.addNoWrap(size - 1);
-				if (!block.contains(end) || !listing.isUndefined(base, end)) {
+				if (!block.contains(end) || !onlyUndefined(listing, base, end)) {
 					continue;
 				}
+				listing.clearCodeUnits(base, end, false);
 				listing.createData(base, Undefined.getUndefinedDataType(size));
 			}
 			catch (AddressOverflowException | CodeUnitInsertionException ex) {
@@ -761,6 +767,30 @@ final class E200DataTypes {
 			}
 		}
 		return created;
+	}
+
+	/**
+	 * Whether a range holds nothing but undefined bytes and data of undefined type that
+	 * starts and ends within it
+	 */
+	private static boolean onlyUndefined(Listing listing, Address start, Address end) {
+		if (listing.isUndefined(start, end)) {
+			return true;
+		}
+		AddressSet range = new AddressSet(start, end);
+		if (listing.getInstructions(range, true).hasNext()) {
+			return false;
+		}
+		Data first = listing.getDataContaining(start);
+		if (first != null && !first.getAddress().equals(start)) {
+			return false;
+		}
+		for (Data d : listing.getDefinedData(range, true)) {
+			if (!Undefined.isUndefined(d.getDataType()) || d.getMaxAddress().compareTo(end) > 0) {
+				return false;
+			}
+		}
+		return true;
 	}
 
 	/**
