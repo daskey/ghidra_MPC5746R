@@ -63,7 +63,8 @@ import ghidra.util.task.TaskMonitor;
  * others get data of the element size or of the size of the pointer's target, typed from
  * the uses, so that the decompiler shows {@code (&BYTE_4000e46e)[i]} instead of
  * {@code *(undefined1 *)(i + 0x4000e46e)} and {@code &SHORT_09294ba0} instead of
- * {@code (short *)&DAT_09294ba0}.
+ * {@code (short *)&DAT_09294ba0}; undefined data of another size than the pointer's target,
+ * as the reference analysis makes of an address an instruction forms, is replaced.
  * <p>
  * Parameters and return values that the functions only copy, and globals they are copied
  * to and from, get the types the values have where they come from or go to (see
@@ -786,8 +787,10 @@ final class E200DataTypes {
 			return false;
 		}
 		for (Data d : listing.getDefinedData(range, true)) {
-			if (!Undefined.isUndefined(d.getDataType()) || d.getMaxAddress().compareTo(end) > 0) {
-				return false;
+			DataType t = d.getDataType();
+			if (!(t instanceof Undefined || t instanceof DefaultDataType) ||
+				d.getMaxAddress().compareTo(end) > 0) {
+				return false; // typed, or an array (of undefined values too)
 			}
 		}
 		return true;

@@ -49,7 +49,17 @@ import ghidra.util.task.TaskMonitor;
  * <p>
  * Before that, a group whose values code uses as pointers to a structure, reading or writing
  * at constant offsets, gets a pointer to a structure of the fields it accesses (see
- * {@link E200Structures}).
+ * {@link E200Structures}), and a group whose values code calls through, or that get the
+ * entry point of a function, a pointer to a function definition (see
+ * {@link E200FunctionPointers.Definitions}): the definition of the functions where they are
+ * known and agree, else one with the arguments of the calls.
+ * <p>
+ * Parameters and return values of one or two bytes arrive in a register of four, which
+ * Decompiler Parameter ID gives them. The width that the uses of a value show (see
+ * {@link E200Integers#width}) is resolved over the places the value is passed to or
+ * returned from, and a parameter whose uses say nothing has the width of the values its
+ * callers pass, when they all are small constants or values extended from a byte or
+ * halfword.
  * <p>
  * Optionally, places whose group shows no type at all then get the unsigned integer of their
  * size ({@code byte}, {@code ushort}, {@code uint}), and pointers to undefined data of 1, 2
@@ -63,7 +73,7 @@ import ghidra.util.task.TaskMonitor;
 final class E200TypeFlow {
 
 	/** Rounds in which the widths of values passed on or returned are resolved */
-	private static final int MAX_WIDTH_ROUNDS = 8;
+	private static final int MAX_WIDTH_ROUNDS = 16;
 
 	private E200TypeFlow() {
 	}
@@ -738,18 +748,34 @@ final class E200TypeFlow {
 				a[2] += e.getValue()[0] == 1 || e.getValue()[0] == 2 ? 1 : 0;
 			}
 		}
+		// The width of each place: its own uses, those of the places its value goes to, and
+		// where those say nothing, its callers' arguments. A place that stays four bytes wide
+		// makes the values passed to it four bytes wide: the call passes the whole register.
+		Set<Slot> all = new HashSet<>(widths.keySet());
+		all.addAll(arguments.keySet());
 		Map<Slot, Integer> resolved = new HashMap<>();
-		widths.forEach((s, w) -> resolved.put(s, w.width));
+		for (Slot s : all) {
+			resolved.put(s, 0);
+		}
 		for (int round = 0; round < MAX_WIDTH_ROUNDS; round++) {
 			monitor.checkCancelled();
 			boolean changed = false;
-			for (Map.Entry<Slot, Width> e : widths.entrySet()) {
-				int w = e.getValue().width;
-				for (Slot dep : e.getValue().deps) {
-					w = Math.max(w, width(program, dep, resolved));
+			for (Slot s : all) {
+				Width w = widths.get(s);
+				int v = w == null ? 0 : w.width;
+				if (w != null) {
+					for (Slot dep : w.deps) {
+						v = Math.max(v, width(program, dep, resolved));
+					}
 				}
-				if (w != resolved.get(e.getKey())) {
-					resolved.put(e.getKey(), w);
+				if (v == 0) {
+					int[] a = arguments.get(s);
+					if (a != null && a[0] >= 1 && a[0] <= 2 && a[2] > 0) {
+						v = a[0];
+					}
+				}
+				if (v != resolved.get(s)) {
+					resolved.put(s, v);
 					changed = true;
 				}
 			}
@@ -757,16 +783,8 @@ final class E200TypeFlow {
 				break;
 			}
 		}
-		for (Map.Entry<Slot, int[]> e : arguments.entrySet()) {
-			int[] a = e.getValue();
-			if (a[0] >= 1 && a[0] <= 2 && a[2] > 0 && resolved.getOrDefault(e.getKey(), 0) == 0) {
-				resolved.put(e.getKey(), a[0]);
-				widths.computeIfAbsent(e.getKey(), s -> new Width()).merge(a[0], a[1], Set.of());
-			}
-		}
 		Set<Slot> narrowed = new HashSet<>();
-		for (Map.Entry<Slot, Width> e : widths.entrySet()) {
-			Slot s = e.getKey();
+		for (Slot s : all) {
 			int width = resolved.get(s);
 			DataType current = current(program, s);
 			if (width == 0 || width > 2 || current == null || current.getLength() != 4 ||
@@ -776,8 +794,10 @@ final class E200TypeFlow {
 				continue;
 			}
 			narrowed.add(s);
-			DataType type =
-				E200Integers.withSign(E200DataTypes.unsigned(width), e.getValue().evidence);
+			Width w = widths.get(s);
+			int[] a = arguments.get(s);
+			int evidence = (w == null ? 0 : w.evidence) + (a == null ? 0 : a[1]);
+			DataType type = E200Integers.withSign(E200DataTypes.unsigned(width), evidence);
 			if (setInteger(program, s, type, globals, complete)) {
 				typed.fromValues().add(s);
 			}
@@ -811,8 +831,9 @@ final class E200TypeFlow {
 
 	/**
 	 * The width of the value in a place that a value is passed to or returned from: that of
-	 * its type if it is a byte or halfword already, else what its own uses show (0 if they
-	 * say nothing), or 4 if there is no such place or nothing is known about it
+	 * its type if it is a byte or halfword already, else the width its own uses and callers
+	 * give it, or 4 if there is no such place or nothing narrows it: it stays four bytes
+	 * wide, and the whole register is passed to it
 	 */
 	private static int width(Program program, Slot dep, Map<Slot, Integer> resolved) {
 		DataType current = current(program, dep);
@@ -824,7 +845,7 @@ final class E200TypeFlow {
 			return current.getLength();
 		}
 		Integer w = resolved.get(dep);
-		return w == null ? 4 : w;
+		return w == null || w == 0 ? 4 : w;
 	}
 
 	/** Whether a group has a pointer to a structure, union or array of its own */

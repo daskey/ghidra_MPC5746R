@@ -45,6 +45,13 @@ import ghidra.program.model.pcode.*;
  * previous field, is left out. Places of another type, such as a pointer to a structure
  * already, are left alone, and so is a group with a place that gets a constant that is no
  * address in memory, as an error code passed where other callers pass a pointer.
+ * <p>
+ * A field that holds a pointer gets the type of what code does with the pointer: a pointer
+ * to a structure of its own fields, to a single value, to a run of bytes (a buffer), to a
+ * function it is called as or that is stored into it, or to the type code casts it to, as
+ * when it is passed to a function that knows. A structure built in an earlier round, from
+ * the functions decompiled then, gets the field types that later rounds show (see
+ * {@link #refine}).
  */
 final class E200Structures {
 

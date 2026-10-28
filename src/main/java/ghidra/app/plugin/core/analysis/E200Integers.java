@@ -47,7 +47,8 @@ import ghidra.program.model.pcode.*;
  * register's four bytes: the decompiler shows {@code param_1 & 0xff} at each use, and casts
  * at each call. A parameter all of whose uses are such is one or two bytes wide, and so is a
  * return value that every caller uses so. A value that a function only passes on to another
- * or returns, as the wrappers of AUTOSAR code do, has the width of the place it goes to.
+ * or returns, as the wrappers of AUTOSAR code do, has the width of the place it goes to
+ * (see {@link E200TypeFlow}, which resolves those).
  */
 final class E200Integers {
 
@@ -176,7 +177,7 @@ final class E200Integers {
 				// the value under another name, in a register or a temporary: what its uses
 				// show; in memory, a global or a local on the stack, the whole value is stored
 				if (depth < 3 && out != null && out.getSize() == 4 && out.getHigh() != null &&
-					(out.isRegister() || out.isUnique())) {
+					(out.isRegister() || out.isUnique()) && !inMemory(out.getHigh())) {
 					return width(out.getHigh(), evidence, functions, entry, deps, depth + 1);
 				}
 			}
@@ -244,6 +245,16 @@ final class E200Integers {
 				return null;
 			}
 		}
+	}
+
+	/** Whether a variable lives in memory: a global, or a local on the stack */
+	private static boolean inMemory(HighVariable high) {
+		if (high instanceof HighGlobal) {
+			return true;
+		}
+		HighSymbol symbol = high.getSymbol();
+		return symbol != null && symbol.getStorage() != null &&
+			(symbol.getStorage().isStackStorage() || symbol.getStorage().isMemoryStorage());
 	}
 
 	/** The type the decompiler gives a value, an integer with the signedness its uses show */
