@@ -211,6 +211,11 @@ final class E200TypeFlow {
 		/** The places whose values code calls through, and the calls */
 		final List<Map.Entry<Slot, E200FunctionPointers.Call>> calls = new ArrayList<>();
 		/**
+		 * The places whose values code casts to a pointer to a structure of the analyzer's
+		 * before passing them on, as {@code lookup((P *)PTR_400089e0)}: the pointer types
+		 */
+		final List<Map.Entry<Slot, DataType>> castsToStructures = new ArrayList<>();
+		/**
 		 * The width of the value the function returns, if every return gives a value extended
 		 * from a byte or halfword, with the signedness the extensions show; else null
 		 */
@@ -338,6 +343,7 @@ final class E200TypeFlow {
 								facts.arguments.add(Map.entry(new Param(target, i - 1),
 									extended == null ? Extension.WIDE : extended));
 							}
+							castToStructure(facts, functions, entry, argument);
 						}
 					}
 					if (op.getOutput() != null) {
@@ -408,13 +414,49 @@ final class E200TypeFlow {
 		if (source != null && !source.equals(sink)) {
 			facts.copies.add(Map.entry(sink, source));
 		}
-		Address pointee = E200Code.addressOf(program, value, 0);
-		if (pointee != null) {
+		for (Address pointee : E200Code.addressesOf(program, value)) {
 			if (functions.getFunctionAt(pointee) != null) {
 				facts.functionTargets.add(Map.entry(sink, pointee));
 			}
 			else {
 				facts.pointees.add(Map.entry(sink, pointee));
+			}
+		}
+	}
+
+	/**
+	 * Records the place whose value an argument is a cast of, as in
+	 * {@code lookup((P *)PTR_400089e0)}, when the cast is to a pointer to a structure of the
+	 * analyzer's: the place holds such a pointer, whatever the decompiler typed it.
+	 */
+	private static void castToStructure(Facts facts, FunctionManager functions, Address entry,
+			Varnode argument) {
+		castToStructure(facts, functions, entry, argument, 0);
+	}
+
+	private static void castToStructure(Facts facts, FunctionManager functions, Address entry,
+			Varnode v, int depth) {
+		PcodeOp def = v == null || depth > 4 ? null : v.getDef();
+		if (def == null) {
+			return;
+		}
+		switch (def.getOpcode()) {
+			case PcodeOp.CAST -> {
+				DataType type = v.getHigh() == null ? null : v.getHigh().getDataType();
+				Slot from = source(functions, entry, def.getInput(0), 0);
+				if (from != null && E200Types.ownStructurePointer(type)) {
+					facts.castsToStructures.add(Map.entry(from, type));
+				}
+			}
+			case PcodeOp.COPY -> castToStructure(facts, functions, entry, def.getInput(0),
+				depth + 1);
+			case PcodeOp.MULTIEQUAL -> { // one of several, as flag ? &a : (P *)PTR_b
+				for (int i = 0; i < def.getNumInputs(); i++) {
+					castToStructure(facts, functions, entry, def.getInput(i), depth + 1);
+				}
+			}
+			default -> {
+				// not a cast of a place's value
 			}
 		}
 	}
@@ -514,6 +556,8 @@ final class E200TypeFlow {
 		final Map<Slot, List<E200FunctionPointers.Call>> calls = new HashMap<>();
 		/** The signedness evidence of the uses of each group's values, by root */
 		final Map<Slot, Integer> signs = new HashMap<>();
+		/** The pointers to the analyzer's structures that code casts each group's values to */
+		final Map<Slot, List<DataType>> castsToStructures = new HashMap<>();
 
 		/**
 		 * @param facts the facts of the decompiled functions
@@ -568,6 +612,9 @@ final class E200TypeFlow {
 				for (Map.Entry<Slot, E200FunctionPointers.Call> e : f.calls) {
 					slots.add(e.getKey());
 				}
+				for (Map.Entry<Slot, DataType> e : f.castsToStructures) {
+					slots.add(e.getKey());
+				}
 			}
 			mergePointing(pointees, monitor);
 			for (Slot s : slots) {
@@ -583,6 +630,10 @@ final class E200TypeFlow {
 				}
 				for (Map.Entry<Slot, E200FunctionPointers.Call> e : f.calls) {
 					calls.computeIfAbsent(find(e.getKey()), r -> new ArrayList<>())
+							.add(e.getValue());
+				}
+				for (Map.Entry<Slot, DataType> e : f.castsToStructures) {
+					castsToStructures.computeIfAbsent(find(e.getKey()), r -> new ArrayList<>())
 							.add(e.getValue());
 				}
 				f.signs.forEach((s, e) -> signs.merge(find(s), e, Integer::sum));
@@ -747,6 +798,7 @@ final class E200TypeFlow {
 			new E200FunctionPointers.Definitions(program);
 		Typed typed = new Typed(new ArrayList<>(), new ArrayList<>(), new ArrayList<>());
 		typeStructurePointers(groups, places, definitions, typed, monitor);
+		typeCastPlaces(groups, places, typed, monitor);
 		typeFunctionPointers(groups, places, definitions, typed, monitor);
 		typeFromValues(groups, places, defaults, typed, monitor);
 		if (defaults) {
@@ -795,6 +847,42 @@ final class E200TypeFlow {
 			for (Address a : instances) {
 				if (places.globals.contains(a) && !groups.disputed.contains(a) &&
 					E200Data.structureAt(program, a, (Structure) pointer.getDataType())) {
+					typed.fromValues().add(new Global(a));
+				}
+			}
+		}
+	}
+
+	/**
+	 * Gives the places whose values code casts to a pointer to a structure of the analyzer's
+	 * before passing them on, as {@code lookup((P *)PTR_400089e0)}, that pointer, where the
+	 * casts agree and the group has no structure of its own, and the data they point to the
+	 * structure: the decompiler typed the place from the single value its address points to.
+	 */
+	private static void typeCastPlaces(Groups groups, Places places, Typed typed,
+			TaskMonitor monitor) throws CancelledException {
+		Program program = places.program;
+		for (Map.Entry<Slot, List<DataType>> e : groups.castsToStructures.entrySet()) {
+			monitor.checkCancelled();
+			Slot root = e.getKey();
+			DataType pointer = e.getValue().get(0);
+			boolean agree = true;
+			for (DataType t : e.getValue()) {
+				agree &= t.isEquivalent(pointer);
+			}
+			if (!agree || groups.shapes.containsKey(root) || groups.integers.contains(root) ||
+				pointsToComposite(groups.types(root))) {
+				continue;
+			}
+			for (Slot s : groups.members.getOrDefault(root, List.of())) {
+				if (E200Structures.replaceable(s.current(program)) && places.set(s, pointer)) {
+					typed.fromValues().add(s);
+				}
+			}
+			Structure structure = (Structure) ((Pointer) pointer).getDataType();
+			for (Address a : groups.pointed.getOrDefault(root, Set.of())) {
+				if (places.globals.contains(a) && !groups.disputed.contains(a) &&
+					E200Data.structureAt(program, a, structure)) {
 					typed.fromValues().add(new Global(a));
 				}
 			}

@@ -15,13 +15,12 @@
  */
 package ghidra.app.plugin.core.analysis;
 
-import java.util.ArrayList;
-import java.util.List;
+import java.util.*;
 
 import ghidra.program.model.address.*;
 import ghidra.program.model.data.*;
 import ghidra.program.model.listing.*;
-import ghidra.program.model.mem.MemoryBlock;
+import ghidra.program.model.mem.*;
 import ghidra.program.model.symbol.*;
 import ghidra.program.model.util.CodeUnitInsertionException;
 import ghidra.util.exception.InvalidInputException;
@@ -103,11 +102,12 @@ final class E200Data {
 		}
 		Data at = listing.getDataContaining(address);
 		if (!block.contains(end) || at != null && (!at.getAddress().equals(address) ||
-			!E200Types.primitive(at.getDataType()) && !smallerStructure(at, s))) {
+			!E200Types.primitive(at.getDataType()) && !primitiveArray(at.getDataType()) &&
+				!smallerStructure(at, s))) {
 			return false;
 		}
 		AddressSet range = new AddressSet(address, end);
-		if (listing.getInstructions(range, true).hasNext()) {
+		if (!strayCode(program, range)) {
 			return false;
 		}
 		for (Data d : listing.getDefinedData(range, true)) {
@@ -118,17 +118,21 @@ final class E200Data {
 			if (smallerStructure(d, s)) {
 				continue; // a structure of the analyzer's inside this one: the larger wins
 			}
-			if (!E200Types.primitive(t)) {
+			// an array of single values is its elements; one of integers is what a copy loop
+			// made of the structure, and says nothing about its fields
+			int elements = primitiveArray(t) ? ((Array) t).getNumElements() : 1;
+			DataType element = primitiveArray(t) ? ((Array) t).getDataType() : t;
+			if (!E200Types.primitive(element)) {
 				return false;
 			}
-			int offset = (int) d.getAddress().subtract(address);
-			DataTypeComponent c = s.getComponentAt(offset);
-			if (!Undefined.isUndefined(t) && !integerOverFields(s, offset, d.getLength(), t) &&
-				(c == null || c.getDataType() instanceof DefaultDataType ||
-					c.getLength() != d.getLength() &&
-						!(c.getLength() > d.getLength() && E200Types.integer(c.getDataType()) &&
-							E200Types.integer(t)))) {
-				return false; // a value that is not a field, nor bytes of integer fields
+			if (elements > 1 && (E200Types.integer(element) || Undefined.isUndefined(element))) {
+				continue;
+			}
+			for (int i = 0; i < elements; i++) {
+				int offset = (int) d.getAddress().subtract(address) + i * element.getLength();
+				if (!valueAtField(s, offset, element)) {
+					return false; // a value that is not a field, nor bytes of integer fields
+				}
 			}
 		}
 		try {
@@ -142,9 +146,50 @@ final class E200Data {
 		return true;
 	}
 
+	/**
+	 * Whether a single value of {@code type} at {@code offset} of a structure lies at a field
+	 * of its size, an integer field it is the first bytes of, or whole integer fields
+	 */
+	private static boolean valueAtField(Structure s, int offset, DataType type) {
+		if (Undefined.isUndefined(type) || integerOverFields(s, offset, type.getLength(), type)) {
+			return true;
+		}
+		DataTypeComponent c = s.getComponentAt(offset);
+		if (c == null || c.getDataType() instanceof DefaultDataType) {
+			return false;
+		}
+		return c.getLength() == type.getLength() || c.getLength() > type.getLength() &&
+			E200Types.integer(c.getDataType()) && E200Types.integer(type);
+	}
+
+	/** Whether a type is an array of single values */
+	private static boolean primitiveArray(DataType type) {
+		return type instanceof Array a && E200Types.primitive(a.getDataType());
+	}
+
 	/** Whether data is a structure of the analyzer's shorter than {@code s} */
 	private static boolean smallerStructure(Data d, Structure s) {
 		return E200Types.ownStructure(d.getDataType()) && d.getLength() < s.getLength();
+	}
+
+	/**
+	 * Whether the code in a range, if any, is stray: instructions of no function that
+	 * nothing flows to, as of data that was disassembled, which data may replace
+	 */
+	private static boolean strayCode(Program program, AddressSetView range) {
+		Listing listing = program.getListing();
+		ReferenceManager references = program.getReferenceManager();
+		for (Instruction instruction : listing.getInstructions(range, true)) {
+			if (listing.getFunctionContaining(instruction.getAddress()) != null) {
+				return false;
+			}
+			for (Reference ref : references.getReferencesTo(instruction.getAddress())) {
+				if (ref.getReferenceType().isFlow()) {
+					return false;
+				}
+			}
+		}
+		return true;
 	}
 
 	/**
@@ -200,12 +245,18 @@ final class E200Data {
 				!block.isInitialized()) {
 				continue;
 			}
+			if (E200Types.ownStructure(type)) {
+				// over single values at its fields too, as a descriptor whose count field
+				// code reads directly
+				structureAt(program, target, (Structure) type);
+				continue;
+			}
 			try {
 				Address end = target.addNoWrap(type.getLength() - 1);
 				if (!block.contains(end)) {
 					continue;
 				}
-				if (!listing.isUndefined(target, end) && untypedAt(listing, target, end, type)) {
+				if (!listing.isUndefined(target, end) && untypedAt(program, target, end, type)) {
 					listing.clearCodeUnits(target, end, false);
 				}
 				if (listing.isUndefined(target, end)) {
@@ -220,13 +271,14 @@ final class E200Data {
 
 	/**
 	 * Whether there is only untyped data where a pointer to {@code type} points: undefined
-	 * values, or a pointer to nothing in particular of the type's size, which the reference
-	 * analysis makes of a value that is an address, as the float 2.0 (0x40000000) is
+	 * values, or pointers to nothing in particular, which the reference analysis makes of
+	 * values that are addresses, as the float 2.0 (0x40000000) is, and of the pointer fields
+	 * of a structure
 	 */
-	private static boolean untypedAt(Listing listing, Address target, Address end,
+	private static boolean untypedAt(Program program, Address target, Address end,
 			DataType type) {
-		if (!E200Types.informative(type) ||
-			listing.getInstructions(new AddressSet(target, end), true).hasNext()) {
+		Listing listing = program.getListing();
+		if (!E200Types.informative(type) || !strayCode(program, new AddressSet(target, end))) {
 			return false;
 		}
 		Data first = listing.getDataContaining(target);
@@ -235,13 +287,53 @@ final class E200Data {
 		}
 		for (Data d : listing.getDefinedData(new AddressSet(target, end), true)) {
 			DataType t = d.getDataType();
-			boolean guessed = t instanceof Pointer p && !E200Types.informative(p) &&
-				d.getLength() == type.getLength();
+			boolean guessed = t instanceof Pointer p && !E200Types.informative(p);
 			if (d.getMaxAddress().compareTo(end) > 0 || !Undefined.isUndefined(t) && !guessed) {
 				return false;
 			}
 		}
 		return true;
+	}
+
+	/**
+	 * The addresses that aligned words of initialized memory hold, outside code: pointers to
+	 * data that code may only reach through them
+	 */
+	static Set<Address> pointerTargets(Program program) {
+		Set<Address> targets = new HashSet<>();
+		Memory memory = program.getMemory();
+		Listing listing = program.getListing();
+		AddressSpace space = program.getAddressFactory().getDefaultAddressSpace();
+		for (MemoryBlock block : memory.getBlocks()) {
+			if (!block.isInitialized() || block.isVolatile()) {
+				continue;
+			}
+			byte[] bytes = new byte[(int) Math.min(block.getSize(), Integer.MAX_VALUE)];
+			try {
+				block.getBytes(block.getStart(), bytes);
+			}
+			catch (MemoryAccessException e) {
+				continue;
+			}
+			long base = block.getStart().getOffset();
+			boolean big = memory.isBigEndian();
+			for (int i = (int) ((4 - base % 4) % 4); i + 4 <= bytes.length; i += 4) {
+				long value = big
+						? (bytes[i] & 0xffL) << 24 | (bytes[i + 1] & 0xffL) << 16 |
+							(bytes[i + 2] & 0xffL) << 8 | bytes[i + 3] & 0xffL
+						: (bytes[i + 3] & 0xffL) << 24 | (bytes[i + 2] & 0xffL) << 16 |
+							(bytes[i + 1] & 0xffL) << 8 | bytes[i] & 0xffL;
+				if (value == 0 || value == 0xffffffffL) {
+					continue;
+				}
+				Address target = space.getAddress(value);
+				if (memory.contains(target) &&
+					listing.getInstructionContaining(block.getStart().add(i)) == null) {
+					targets.add(target);
+				}
+			}
+		}
+		return targets;
 	}
 
 	/** Pointers in data: the data itself, or its components and theirs, as in a table */

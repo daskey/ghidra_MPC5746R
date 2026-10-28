@@ -909,40 +909,8 @@ final class E200Tables {
 	 * variables that code may only reach through them
 	 */
 	private Set<Address> pointers() {
-		if (pointers != null) {
-			return pointers;
-		}
-		pointers = new HashSet<>();
-		Memory memory = program.getMemory();
-		AddressSpace space = program.getAddressFactory().getDefaultAddressSpace();
-		for (MemoryBlock block : memory.getBlocks()) {
-			if (!block.isInitialized() || block.isVolatile()) {
-				continue;
-			}
-			byte[] bytes = new byte[(int) Math.min(block.getSize(), Integer.MAX_VALUE)];
-			try {
-				block.getBytes(block.getStart(), bytes);
-			}
-			catch (MemoryAccessException e) {
-				continue;
-			}
-			long base = block.getStart().getOffset();
-			boolean big = memory.isBigEndian();
-			for (int i = (int) ((4 - base % 4) % 4); i + 4 <= bytes.length; i += 4) {
-				long value = big
-						? (bytes[i] & 0xffL) << 24 | (bytes[i + 1] & 0xffL) << 16 |
-							(bytes[i + 2] & 0xffL) << 8 | bytes[i + 3] & 0xffL
-						: (bytes[i + 3] & 0xffL) << 24 | (bytes[i + 2] & 0xffL) << 16 |
-							(bytes[i + 1] & 0xffL) << 8 | bytes[i] & 0xffL;
-				if (value == 0 || value == 0xffffffffL) {
-					continue;
-				}
-				Address target = space.getAddress(value);
-				if (memory.contains(target) &&
-					listing.getInstructionContaining(block.getStart().add(i)) == null) {
-					pointers.add(target);
-				}
-			}
+		if (pointers == null) {
+			pointers = E200Data.pointerTargets(program);
 		}
 		return pointers;
 	}

@@ -15,7 +15,7 @@
  */
 package ghidra.app.plugin.core.analysis;
 
-import java.util.Iterator;
+import java.util.*;
 
 import ghidra.program.model.address.*;
 import ghidra.program.model.data.DataType;
@@ -146,6 +146,34 @@ final class E200Code {
 		};
 	}
 
+	/**
+	 * The addresses a value may be (see {@link #addressOf}), through the merges of several,
+	 * as in {@code f(flag ? &a : &b)}
+	 */
+	static Set<Address> addressesOf(Program program, Varnode value) {
+		Set<Address> addresses = new LinkedHashSet<>();
+		addressesOf(program, value, 0, addresses);
+		return addresses;
+	}
+
+	private static void addressesOf(Program program, Varnode value, int depth,
+			Set<Address> addresses) {
+		if (value == null || depth > 4) {
+			return;
+		}
+		PcodeOp def = value.getDef();
+		if (def != null && def.getOpcode() == PcodeOp.MULTIEQUAL) {
+			for (int i = 0; i < def.getNumInputs(); i++) {
+				addressesOf(program, def.getInput(i), depth + 1, addresses);
+			}
+			return;
+		}
+		Address address = addressOf(program, value, 0);
+		if (address != null) {
+			addresses.add(address);
+		}
+	}
+
 	/** A value without the casts and copies the decompiler put on it */
 	static Varnode unwrap(Varnode value) {
 		for (int depth = 0; value != null && depth < 4; depth++) {
@@ -182,6 +210,46 @@ final class E200Code {
 			type = t;
 		}
 		return type;
+	}
+
+	/**
+	 * The pointer types that the code casts a loaded value to after arithmetic on it, as in
+	 * {@code *(float *)((int)p->values + i * 4)}: what the value points to when the code
+	 * chooses the type at run time
+	 */
+	static List<DataType> castsAfterArithmetic(Varnode value) {
+		List<DataType> casts = new ArrayList<>();
+		Set<Varnode> seen = new HashSet<>();
+		Deque<Varnode> todo = new ArrayDeque<>();
+		todo.add(value);
+		while (!todo.isEmpty() && seen.size() < 64) {
+			Varnode v = todo.pop();
+			if (v == null || !seen.add(v)) {
+				continue;
+			}
+			Iterator<PcodeOp> uses = v.getDescendants();
+			while (uses.hasNext()) {
+				PcodeOp op = uses.next();
+				Varnode out = op.getOutput();
+				switch (op.getOpcode()) {
+					case PcodeOp.CAST -> {
+						DataType t = out.getHigh() == null ? null : out.getHigh().getDataType();
+						if (t instanceof Pointer && E200Types.informative(t)) {
+							casts.add(t);
+						}
+						else {
+							todo.add(out); // to an integer, for the arithmetic
+						}
+					}
+					case PcodeOp.COPY, PcodeOp.MULTIEQUAL, PcodeOp.INT_ADD, PcodeOp.PTRADD,
+							PcodeOp.INT_SUB -> todo.add(out);
+					default -> {
+						// not the pointer any more
+					}
+				}
+			}
+		}
+		return casts;
 	}
 
 	/** The value of a constant varnode, sign extended from its size */

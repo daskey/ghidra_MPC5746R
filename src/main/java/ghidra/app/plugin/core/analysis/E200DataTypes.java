@@ -225,7 +225,8 @@ final class E200DataTypes {
 				}
 			}
 			int functionPointers = E200FunctionPointers.apply(program, monitor);
-			log(counts, functionPointers);
+			int fieldArrays = E200FieldArrays.apply(program, monitor);
+			log(counts, functionPointers, fieldArrays);
 		}
 		catch (CancelledException | InterruptedException e) {
 			throw new CancelledException();
@@ -328,10 +329,14 @@ final class E200DataTypes {
 		return affected;
 	}
 
-	private static void log(Counts counts, int functionPointers) {
+	private static void log(Counts counts, int functionPointers, int fieldArrays) {
 		if (functionPointers > 0) {
 			Msg.info(E200Analyzer.class, "Typed " + functionPointers +
 				" pointers, array elements and structure fields in flash that point to functions");
+		}
+		if (fieldArrays > 0) {
+			Msg.info(E200Analyzer.class, "Created " + fieldArrays +
+				" arrays that pointer fields of structures point to");
 		}
 		if (counts.tables > 0) {
 			Msg.info(E200Analyzer.class, "Created " + counts.tables +
