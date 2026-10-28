@@ -236,7 +236,10 @@ functions, runs the parts below in rounds and logs what they did:
   fields and the function writes it as a whole. Data that code passes as a pointer to such a
   structure, as a map descriptor in flash passed to a lookup function, gets the structure
   where only single values at its fields are there (an integer over whole integer fields, or
-  a byte of one, counts), and the data its pointer fields point to gets the pointed-to type
+  a byte of one, counts; so do the pointers to nothing in particular that the reference
+  analysis guesses at values that are addresses, and stray instructions nothing flows to;
+  an address in flash that code passes as a pointer starts another object, and the structure
+  does not go over it), and the data its pointer fields point to gets the pointed-to type
   (a byte for a `void *`; all of flash is executable in an image, and the reference analysis
   would disassemble an undefined target): `lookup(&P_50800274_092923ec, x)` instead of
   `lookup((P_50800274 *)&USHORT_092923ec, x)`, also where it is one of several the code
