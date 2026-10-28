@@ -129,7 +129,7 @@ final class E200SmallDataBases {
 		if (!enabled) {
 			return changes;
 		}
-		AddressSetView code = E200Analyzer.executableMemory(program);
+		AddressSetView code = E200Code.executableMemory(program);
 		for (String[] base : BASES) {
 			monitor.checkCancelled();
 			Register reg = program.getRegister(base[0]);
@@ -618,7 +618,7 @@ final class E200SmallDataBases {
 		Listing listing = program.getListing();
 		PseudoDisassembler disassembler = new PseudoDisassembler(program);
 		byte[] bytes = new byte[0x10000];
-		for (AddressRange range : E200Analyzer.executableMemory(program)) {
+		for (AddressRange range : E200Code.executableMemory(program)) {
 			Address address = range.getMinAddress();
 			// instructions are halfword aligned
 			if ((address.getOffset() & 1) != 0) {
@@ -692,7 +692,7 @@ final class E200SmallDataBases {
 							: value + low.getSignedValue();
 					return value & 0xffffffffL;
 				}
-				if (E200Analyzer.writes(ins, reg) || ins.getFlowType().isJump() ||
+				if (E200Code.writes(ins, reg) || ins.getFlowType().isJump() ||
 					ins.getFlowType().isTerminal()) {
 					return null;
 				}

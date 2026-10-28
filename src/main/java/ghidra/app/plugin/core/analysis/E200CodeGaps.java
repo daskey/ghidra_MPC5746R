@@ -79,7 +79,7 @@ final class E200CodeGaps {
 	static List<Address> findFunctions(Program program, AddressSetView set, TaskMonitor monitor)
 			throws CancelledException {
 		Listing listing = program.getListing();
-		AddressSetView executable = E200Analyzer.executableMemory(program);
+		AddressSetView executable = E200Code.executableMemory(program);
 		Set<Address> gaps = new TreeSet<>();
 		for (Function function : program.getFunctionManager().getFunctions(set, true)) {
 			for (AddressRange range : function.getBody()) {
@@ -129,8 +129,9 @@ final class E200CodeGaps {
 	 * The entry points of the subroutines that cover the gap starting at {@code start}, or an
 	 * empty list if the gap is not all code.
 	 */
-	static List<Address> findSubroutines(Program program, PseudoDisassembler disassembler,
-			Map<String, Integer> uses, Address start, AddressSetView executable) {
+	private static List<Address> findSubroutines(Program program,
+			PseudoDisassembler disassembler, Map<String, Integer> uses, Address start,
+			AddressSetView executable) {
 		Listing listing = program.getListing();
 		Memory memory = program.getMemory();
 		if ((start.getOffset() & 1) != 0 || !endsFlow(listing, start)) {
@@ -311,7 +312,7 @@ final class E200CodeGaps {
 		Listing listing = program.getListing();
 		Memory memory = program.getMemory();
 		FunctionManager functions = program.getFunctionManager();
-		AddressSetView executable = E200Analyzer.executableMemory(program);
+		AddressSetView executable = E200Code.executableMemory(program);
 		AddressSpace space = program.getAddressFactory().getDefaultAddressSpace();
 		Set<Address> candidates = new TreeSet<>();
 		byte[] bytes = new byte[0x10000];

@@ -21,10 +21,7 @@ import ghidra.app.services.*;
 import ghidra.app.util.importer.MessageLog;
 import ghidra.framework.options.Options;
 import ghidra.program.model.address.*;
-import ghidra.program.model.lang.Register;
 import ghidra.program.model.listing.*;
-import ghidra.program.model.mem.Memory;
-import ghidra.program.model.mem.MemoryBlock;
 import ghidra.util.exception.CancelledException;
 import ghidra.util.task.TaskMonitor;
 
@@ -49,6 +46,9 @@ import ghidra.util.task.TaskMonitor;
  * </ul>
  * An analysis ends with the data types step; code given to the analyzer after it, as when the
  * user disassembles more or runs the analyzer as one-shot analysis, starts the next.
+ * <p>
+ * The steps share the helpers of {@link E200Code} (executable memory, instructions and
+ * p-code), {@link E200Data} (the data of the listing) and {@link E200Types} (data types).
  */
 public class E200Analyzer extends AbstractAnalyzer {
 
@@ -142,31 +142,6 @@ public class E200Analyzer extends AbstractAnalyzer {
 			dataTypeStage.schedule(program, new AddressSet());
 		}
 		return ok;
-	}
-
-	/**
-	 * Executable memory with initialized bytes, or all initialized memory if no block is
-	 * marked executable.
-	 */
-	static AddressSetView executableMemory(Program program) {
-		Memory memory = program.getMemory();
-		AddressSet set = new AddressSet();
-		for (MemoryBlock block : memory.getBlocks()) {
-			if (block.isExecute() && block.isInitialized()) {
-				set.add(block.getStart(), block.getEnd());
-			}
-		}
-		return set.isEmpty() ? memory.getLoadedAndInitializedAddressSet() : set;
-	}
-
-	/** Whether an instruction writes a register or a register that contains it */
-	static boolean writes(Instruction instruction, Register register) {
-		for (Object result : instruction.getResultObjects()) {
-			if (result instanceof Register r && r.contains(register)) {
-				return true;
-			}
-		}
-		return false;
 	}
 
 	/** The data types step, which ends the analysis */

@@ -84,13 +84,7 @@ final class E200Structures {
 
 		void merge(Shape other) {
 			for (Map.Entry<Long, Field> e : other.fields.entrySet()) {
-				Field f = field(e.getKey());
-				f.sizes.addAll(e.getValue().sizes);
-				f.types.addAll(e.getValue().types);
-				f.target.merge(e.getValue().target);
-				f.casts.addAll(e.getValue().casts);
-				f.targets.addAll(e.getValue().targets);
-				f.calls.addAll(e.getValue().calls);
+				field(e.getKey()).merge(e.getValue());
 			}
 			mixed |= other.mixed || stride != 0 && other.stride != 0 && stride != other.stride;
 			stride = Math.max(stride, other.stride);
@@ -108,11 +102,11 @@ final class E200Structures {
 			}
 			for (Map.Entry<Long, Field> e : fields.entrySet()) {
 				long offset = e.getKey();
-				int size = size(e.getValue());
+				int size = e.getValue().size();
 				// the fields of the other shape that start in this field
 				for (Map.Entry<Long, Field> o : other.fields.subMap(offset, offset + size)
 						.entrySet()) {
-					int otherSize = size(o.getValue());
+					int otherSize = o.getValue().size();
 					if (o.getKey() == offset ? otherSize != size && otherSize != 1 && size != 1
 							: otherSize != 1) {
 						return false;
@@ -120,7 +114,7 @@ final class E200Structures {
 				}
 				// the field of the other shape that this field starts in
 				Map.Entry<Long, Field> before = other.fields.lowerEntry(offset);
-				if (before != null && before.getKey() + size(before.getValue()) > offset &&
+				if (before != null && before.getKey() + before.getValue().size() > offset &&
 					size != 1) {
 					return false;
 				}
@@ -138,7 +132,7 @@ final class E200Structures {
 			}
 			long next = 0;
 			for (Map.Entry<Long, Field> e : fields.entrySet()) {
-				if (e.getKey() != next || size(e.getValue()) != 1) {
+				if (e.getKey() != next || e.getValue().size() != 1) {
 					return false;
 				}
 				next++;
@@ -155,11 +149,11 @@ final class E200Structures {
 				return false;
 			}
 			if (fields.size() == 1) {
-				return fields.firstKey() != 0 || stride > size(fields.firstEntry().getValue());
+				return fields.firstKey() != 0 || stride > fields.firstEntry().getValue().size();
 			}
 			long next = 0;
 			for (Map.Entry<Long, Field> e : fields.entrySet()) {
-				if (e.getKey() != next || size(e.getValue()) != 1) {
+				if (e.getKey() != next || e.getValue().size() != 1) {
 					return true;
 				}
 				next++;
@@ -168,9 +162,14 @@ final class E200Structures {
 		}
 	}
 
+	/** A load or store of a field: its size and the type of the value */
+	record Access(int size, DataType type) {
+	}
+
+	/** A field of a shape: what code does at one offset */
 	static final class Field {
-		final List<Integer> sizes = new ArrayList<>();
-		final List<DataType> types = new ArrayList<>();
+		final List<Access> accesses = new ArrayList<>();
+		/** What code does with the field's value as a pointer */
 		final Shape target = new Shape();
 		/** The pointer types that code casts the field's value to, as {@code (float *)p->f4} */
 		final List<DataType> casts = new ArrayList<>();
@@ -178,12 +177,22 @@ final class E200Structures {
 		final Set<Address> targets = new TreeSet<>();
 		/** The calls through the field's value */
 		final List<E200FunctionPointers.Call> calls = new ArrayList<>();
+
+		/** The size most accesses of the field have, the larger on a tie */
+		int size() {
+			return E200Types.mostFrequent(accesses.stream().map(Access::size).toList());
+		}
+
+		void merge(Field other) {
+			accesses.addAll(other.accesses);
+			target.merge(other.target);
+			casts.addAll(other.casts);
+			targets.addAll(other.targets);
+			calls.addAll(other.calls);
+		}
 	}
 
-	/** The size most accesses of a field have, the larger on a tie */
-	private static int size(Field f) {
-		return E200DataTypes.mostFrequent(f.sizes);
-	}
+	// ---- Collection ---------------------------------------------------------------------------
 
 	/** Adds the shapes of the parameters, globals and call results of a function to facts. */
 	static void collect(HighFunction high, Facts facts) {
@@ -210,7 +219,7 @@ final class E200Structures {
 			PcodeOpAST op = ops.next();
 			if (op.getOpcode() == PcodeOp.CALL && op.getOutput() != null &&
 				op.getOutput().getSize() == 4) {
-				Function callee = E200TypeFlow.callee(functions, op);
+				Function callee = E200Code.callee(functions, op);
 				if (callee != null) {
 					Shape shape = new Shape();
 					walk(functions, op.getOutput(), 0, shape, new HashSet<>(), 0);
@@ -253,13 +262,13 @@ final class E200Structures {
 				case PcodeOp.INT_ADD, PcodeOp.PTRSUB -> {
 					Varnode other = op.getInput(0) == v ? op.getInput(1) : op.getInput(0);
 					if (other.isConstant()) {
-						long o = offset + signed(other);
+						long o = offset + E200Code.signed(other);
 						if (o >= 0 && o <= MAX_OFFSET) {
 							walk(functions, out, o, shape, seen, depth);
 						}
 					}
 					else if (offset == 0 && op.getOpcode() == PcodeOp.INT_ADD) {
-						index(functions, out, stride(other), shape, seen, depth);
+						index(functions, out, E200Code.stride(other), shape, seen, depth);
 					}
 				}
 				case PcodeOp.PTRADD -> {
@@ -268,22 +277,22 @@ final class E200Structures {
 					}
 					long size = op.getInput(2).getOffset();
 					if (op.getInput(1).isConstant()) {
-						long o = offset + signed(op.getInput(1)) * size;
+						long o = offset + E200Code.signed(op.getInput(1)) * size;
 						if (o >= 0 && o <= MAX_OFFSET) {
 							walk(functions, out, o, shape, seen, depth);
 						}
 					}
 					else if (offset == 0) {
-						index(functions, out, size * stride(op.getInput(1)), shape, seen, depth);
+						index(functions, out, size * E200Code.stride(op.getInput(1)), shape, seen,
+							depth);
 					}
 				}
 				case PcodeOp.LOAD -> {
 					if (op.getInput(1) == v && out != null) {
 						Field f = shape.field(offset);
-						f.sizes.add(out.getSize());
-						f.types.add(type(out));
+						f.accesses.add(new Access(out.getSize(), E200Integers.of(out)));
 						if (out.getSize() == 4) {
-							DataType cast = E200Tables.castTo(out);
+							DataType cast = E200Code.castTo(out);
 							if (cast != null) {
 								f.casts.add(cast);
 							}
@@ -296,11 +305,10 @@ final class E200Structures {
 				}
 				case PcodeOp.STORE -> {
 					if (op.getInput(1) == v) {
+						Varnode value = op.getInput(2);
 						Field f = shape.field(offset);
-						f.sizes.add(op.getInput(2).getSize());
-						f.types.add(type(op.getInput(2)));
-						Address target = E200TypeFlow.addressOf(functions.getProgram(),
-							op.getInput(2), 0);
+						f.accesses.add(new Access(value.getSize(), E200Integers.of(value)));
+						Address target = E200Code.addressOf(functions.getProgram(), value, 0);
 						if (target != null && functions.getFunctionAt(target) != null) {
 							f.targets.add(target);
 						}
@@ -345,32 +353,7 @@ final class E200Structures {
 		walk(functions, element, 0, shape, seen, depth);
 	}
 
-	/** The multiplier of an index, as in {@code i * 0x14} or {@code i << 2}, else 1 */
-	private static long stride(Varnode index) {
-		PcodeOp def = index.getDef();
-		if (def == null) {
-			return 1;
-		}
-		return switch (def.getOpcode()) {
-			case PcodeOp.INT_MULT -> def.getInput(1).isConstant() ? def.getInput(1).getOffset()
-					: def.getInput(0).isConstant() ? def.getInput(0).getOffset() : 1;
-			case PcodeOp.INT_LEFT -> def.getInput(1).isConstant() &&
-				def.getInput(1).getOffset() < 16 ? 1L << def.getInput(1).getOffset() : 1;
-			case PcodeOp.CAST, PcodeOp.COPY, PcodeOp.INT_ZEXT, PcodeOp.INT_SEXT ->
-				stride(def.getInput(0));
-			default -> 1;
-		};
-	}
-
-	private static long signed(Varnode constant) {
-		long value = constant.getOffset();
-		int bits = constant.getSize() * 8;
-		return bits >= 64 ? value : value << (64 - bits) >> (64 - bits);
-	}
-
-	private static DataType type(Varnode v) {
-		return E200Integers.of(v);
-	}
+	// ---- Structures ---------------------------------------------------------------------------
 
 	/**
 	 * Builds the structure a shape describes, named {@code name}, with the structures its
@@ -386,13 +369,14 @@ final class E200Structures {
 			Shape shape, String name, boolean signedChar, int depth, long limit,
 			TreeMap<Long, DataType> pieces) {
 		DataTypeManager manager = program.getDataTypeManager();
-		StructureDataType structure = new StructureDataType(E200Tables.CATEGORY, name, 0, manager);
+		StructureDataType structure =
+			new StructureDataType(E200Types.CATEGORY, name, 0, manager);
 		long end = 0;
 		Map<Long, DataType> types = new TreeMap<>();
 		for (Map.Entry<Long, Field> e : shape.fields.entrySet()) {
 			long offset = e.getKey();
 			Field f = e.getValue();
-			int size = size(f);
+			int size = f.size();
 			if (size == 0 || offset < end || limit > 0 && offset + size > limit) {
 				continue; // overlaps the previous field, or lies past the limit
 			}
@@ -429,9 +413,8 @@ final class E200Structures {
 				}
 				else if (f.target.fields.size() == 1 || f.target.buffer()) {
 					// a single value, or bytes from offset 0 on
-					int targetSize = size(f.target.fields.firstEntry().getValue());
-					DataType targetType = fieldType(f.target.fields.firstEntry().getValue(),
-						targetSize, signedChar);
+					Field first = f.target.fields.firstEntry().getValue();
+					DataType targetType = fieldType(first, first.size(), signedChar);
 					type = targetType == null ? null
 							: new PointerDataType(targetType, 4, manager);
 				}
@@ -477,7 +460,7 @@ final class E200Structures {
 		DataType structure = null;
 		DataType other = null;
 		for (DataType t : casts) {
-			if (E200Tables.ownStructurePointer(t)) {
+			if (E200Types.ownStructurePointer(t)) {
 				if (structure != null && !structure.isEquivalent(t)) {
 					return null;
 				}
@@ -493,6 +476,21 @@ final class E200Structures {
 		return structure != null ? structure : other;
 	}
 
+	/** The type of a field: the one its accesses of {@code size} agree on, else undefined */
+	private static DataType fieldType(Field f, int size, boolean signedChar) {
+		List<DataType> types = new ArrayList<>();
+		for (Access a : f.accesses) {
+			DataType t = a.type();
+			if (a.size() == size && t != null && E200Types.informative(t) &&
+				t.getLength() == size && !(t instanceof Pointer)) {
+				types.add(t);
+			}
+		}
+		DataType type = types.isEmpty() ? null : E200Types.chooseType(types, signedChar, true);
+		return type != null && type.getLength() == size ? type
+				: Undefined.getUndefinedDataType(size);
+	}
+
 	/**
 	 * Gives the fields of a structure built before the types that a structure built now
 	 * from more of the code shows: a field that was undefined or an integer and is a pointer
@@ -504,14 +502,12 @@ final class E200Structures {
 		int changed = 0;
 		for (DataTypeComponent c : built.getDefinedComponents()) {
 			DataType type = c.getDataType();
-			if (type instanceof Pointer p && p.getDataType() instanceof Structure nested &&
-				nested.getCategoryPath().equals(E200Tables.CATEGORY)) {
-				DataType known = manager.getDataType(E200Tables.CATEGORY, nested.getName());
-				if (known instanceof Structure s) {
-					if (s != nested) {
-						refine(manager, s, nested);
-						type = new PointerDataType(s, 4, manager);
-					}
+			if (type instanceof Pointer p && E200Types.ownStructure(p.getDataType())) {
+				Structure nested = (Structure) p.getDataType();
+				DataType known = manager.getDataType(E200Types.CATEGORY, nested.getName());
+				if (known instanceof Structure s && s != nested) {
+					refine(manager, s, nested);
+					type = new PointerDataType(s, 4, manager);
 				}
 			}
 			int offset = c.getOffset();
@@ -531,7 +527,7 @@ final class E200Structures {
 						free = false;
 					}
 				}
-				if (!free || !E200TypeFlow.informative(type)) {
+				if (!free || !E200Types.informative(type)) {
 					continue;
 				}
 			}
@@ -551,7 +547,7 @@ final class E200Structures {
 	 * now, or pointed to undefined and points to something now
 	 */
 	private static boolean refinable(DataType current, DataType type) {
-		if (!E200TypeFlow.informative(type) || type.isEquivalent(current)) {
+		if (!E200Types.informative(type) || type.isEquivalent(current)) {
 			return false;
 		}
 		if (Undefined.isUndefined(current)) {
@@ -561,24 +557,9 @@ final class E200Structures {
 			return type instanceof Pointer || type instanceof AbstractFloatDataType;
 		}
 		if (current instanceof Pointer p && type instanceof Pointer) {
-			return !E200TypeFlow.informative(p);
+			return !E200Types.informative(p);
 		}
 		return false;
-	}
-
-	/** The type of a field: the one its accesses of {@code size} agree on, else undefined */
-	private static DataType fieldType(Field f, int size, boolean signedChar) {
-		List<DataType> types = new ArrayList<>();
-		for (int i = 0; i < f.types.size(); i++) {
-			DataType t = f.types.get(i);
-			if (f.sizes.get(i) == size && t != null && E200TypeFlow.informative(t) &&
-				t.getLength() == size && !(t instanceof Pointer)) {
-				types.add(t);
-			}
-		}
-		DataType type = types.isEmpty() ? null : E200DataTypes.chooseType(types, signedChar, true);
-		return type != null && type.getLength() == size ? type
-				: Undefined.getUndefinedDataType(size);
 	}
 
 	/**
@@ -586,10 +567,8 @@ final class E200Structures {
 	 * value of a pointer's size, or a pointer to a single value, not set by the user
 	 */
 	static boolean replaceable(DataType current) {
-		if (current == null || current.getLength() != 4 || current instanceof DefaultDataType) {
-			return false;
-		}
-		if (current instanceof TypeDef) {
+		if (current == null || current.getLength() != 4 || current instanceof DefaultDataType ||
+			current instanceof TypeDef) {
 			return false;
 		}
 		if (Undefined.isUndefined(current) || current instanceof AbstractIntegerDataType) {

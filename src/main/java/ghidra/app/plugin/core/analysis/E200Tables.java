@@ -19,7 +19,6 @@ import java.util.*;
 
 import ghidra.program.model.address.*;
 import ghidra.program.model.data.*;
-import ghidra.program.model.data.Enum;
 import ghidra.program.model.listing.*;
 import ghidra.program.model.mem.*;
 import ghidra.program.model.pcode.*;
@@ -28,7 +27,6 @@ import ghidra.program.model.util.CodeUnitInsertionException;
 import ghidra.util.InvalidNameException;
 import ghidra.util.Msg;
 import ghidra.util.exception.CancelledException;
-import ghidra.util.exception.InvalidInputException;
 import ghidra.util.task.TaskMonitor;
 
 /**
@@ -66,12 +64,9 @@ import ghidra.util.task.TaskMonitor;
  * shows more; with default types, those that remain untyped get the unsigned integer of
  * their size. A loaded pointer gets the type code casts it to, and a pointer to a primitive
  * the pointer to a structure the analyzer made that starts with it. The data that pointer
- * fields point to gets the pointed-to type (see {@link E200DataTypes#targets}).
+ * fields point to gets the pointed-to type (see {@link E200Data#targets}).
  */
 final class E200Tables {
-
-	/** Category of the structures of tables */
-	static final CategoryPath CATEGORY = new CategoryPath("/E200");
 
 	/** Elements of a table, and its size */
 	private static final int MAX_ELEMENTS = 4096;
@@ -109,6 +104,8 @@ final class E200Tables {
 		this.references = program.getReferenceManager();
 		this.signedChar = program.getDataTypeManager().getDataOrganization().isSignedChar();
 	}
+
+	// ---- Collection ---------------------------------------------------------------------------
 
 	/** The loads and stores at a constant address, plus an index or not, of a function */
 	static List<Access> collect(HighFunction high) {
@@ -148,12 +145,11 @@ final class E200Tables {
 			if (!ok || program.getMemory().getBlock(address) == null) {
 				continue;
 			}
-			HighVariable variable = value.getHigh();
-			DataType type = E200Integers.of(variable);
-			boolean open = !E200TypeFlow.informative(type);
+			DataType type = E200Integers.of(value.getHigh());
+			boolean open = !E200Types.informative(type);
 			if (opcode == PcodeOp.LOAD && (open || type instanceof Pointer)) {
-				DataType cast = castTo(value); // what code takes a loaded pointer for
-				if (cast != null && (open || ownStructurePointer(cast))) {
+				DataType cast = E200Code.castTo(value); // what code takes a loaded pointer for
+				if (cast != null && (open || E200Types.ownStructurePointer(cast))) {
 					type = cast;
 				}
 			}
@@ -162,41 +158,6 @@ final class E200Tables {
 						inner == main.scale() ? 0 : inner, bound(main.index())));
 		}
 		return accesses;
-	}
-
-	/**
-	 * The pointer type that the uses of a loaded untyped value cast it to, as in
-	 * {@code (float *)tbl[i].f4} or a call's {@code (S *)} parameter, if they agree
-	 */
-	static DataType castTo(Varnode value) {
-		DataType type = null;
-		Iterator<PcodeOp> uses = value.getDescendants();
-		while (uses.hasNext()) {
-			PcodeOp op = uses.next();
-			if (op.getOpcode() != PcodeOp.CAST || op.getOutput().getHigh() == null) {
-				continue;
-			}
-			DataType t = op.getOutput().getHigh().getDataType();
-			if (!(t instanceof Pointer) || !E200TypeFlow.informative(t) ||
-				t.getLength() != value.getSize()) {
-				continue;
-			}
-			if (type != null && !type.isEquivalent(t)) {
-				return null;
-			}
-			type = t;
-		}
-		return type;
-	}
-
-	/** Whether a type is a structure the analyzer created */
-	static boolean ownStructure(DataType type) {
-		return type instanceof Structure s && s.getCategoryPath().equals(CATEGORY);
-	}
-
-	/** Whether a type is a pointer to a structure the analyzer created */
-	static boolean ownStructurePointer(DataType type) {
-		return type instanceof Pointer p && ownStructure(p.getDataType());
 	}
 
 	/** An address as a constant (modulo the address size) plus indexes times their strides */
@@ -271,12 +232,6 @@ final class E200Tables {
 		sum.terms.add(new Term(v, scale));
 	}
 
-	private static long signed(Varnode constant) {
-		long value = constant.getOffset();
-		int bits = constant.getSize() * 8;
-		return bits >= 64 ? value : value << (64 - bits) >> (64 - bits);
-	}
-
 	/**
 	 * The number of elements an index can reach, from the comparisons of it with a constant
 	 * and masks of it, the largest; 0 if none gives at least two.
@@ -343,10 +298,11 @@ final class E200Tables {
 		}
 		boolean left = op.getInput(0) == v;
 		Varnode other = op.getInput(left ? 1 : 0);
-		if (!other.isConstant() || signed(other) <= 0 || signed(other) >= MAX_ELEMENTS) {
+		if (!other.isConstant() || E200Code.signed(other) <= 0 ||
+			E200Code.signed(other) >= MAX_ELEMENTS) {
 			return 0;
 		}
-		int k = (int) signed(other);
+		int k = (int) E200Code.signed(other);
 		if (k == 0xfe || k == 0xff || k == 0x100) {
 			return 0; // 0xff marks an index that is not valid, not the end of a table
 		}
@@ -358,6 +314,8 @@ final class E200Tables {
 			default -> 0;
 		};
 	}
+
+	// ---- Tables -------------------------------------------------------------------------------
 
 	/**
 	 * Types the fields of the tables created before from the accesses, creates the tables
@@ -398,8 +356,8 @@ final class E200Tables {
 		for (Map.Entry<Table, TreeMap<Long, List<DataType>>> e : fieldTypes.entrySet()) {
 			monitor.checkCancelled();
 			for (Map.Entry<Long, List<DataType>> f : e.getValue().entrySet()) {
-				DataType type = E200DataTypes.chooseType(pointerTypes(f.getValue()), signedChar,
-					true);
+				DataType type =
+					E200Types.chooseType(pointerTypes(f.getValue()), signedChar, true);
 				if (type != null && retype(e.getKey(), f.getKey(), type)) {
 					changed.add(e.getKey().start().add(f.getKey()));
 				}
@@ -422,13 +380,27 @@ final class E200Tables {
 				for (long offset : offsets) {
 					DataType type = fieldType(table, offset);
 					if (type != null && Undefined.isUndefined(type) &&
-						retype(table, offset, E200DataTypes.unsigned(type.getLength()))) {
+						retype(table, offset, E200Types.unsigned(type.getLength()))) {
 						changed.add(table.start().add(offset));
 					}
 				}
 			}
 		}
 		return created;
+	}
+
+	/**
+	 * Whether an address is in a table whose field there has no type or points to undefined,
+	 * which the decompiled code may show more of
+	 */
+	boolean openField(Address address) {
+		Table table = tableContaining(address);
+		if (table == null) {
+			return false;
+		}
+		DataType type = fieldType(table, address.subtract(table.start()) % table.stride());
+		return type != null && (Undefined.isUndefined(type) ||
+			type instanceof Pointer && !E200Types.informative(type));
 	}
 
 	private Table tableContaining(Address address) {
@@ -474,10 +446,10 @@ final class E200Tables {
 		List<DataType> structures = new ArrayList<>();
 		List<DataType> typed = new ArrayList<>();
 		for (DataType t : types) {
-			if (ownStructurePointer(t)) {
+			if (E200Types.ownStructurePointer(t)) {
 				structures.add(t);
 			}
-			if (!(t instanceof Pointer) || E200TypeFlow.informative(t)) {
+			if (!(t instanceof Pointer) || E200Types.informative(t)) {
 				typed.add(t);
 			}
 		}
@@ -498,34 +470,19 @@ final class E200Tables {
 			return true;
 		}
 		if (!(current instanceof Pointer p) || !(type instanceof Pointer q) ||
-			!E200TypeFlow.informative(type)) {
+			!E200Types.informative(type)) {
 			return false;
 		}
-		if (!E200TypeFlow.informative(current)) {
+		if (!E200Types.informative(current)) {
 			return true;
 		}
 		DataType target = p.getDataType();
-		if (target instanceof Composite || !ownStructurePointer(q)) {
+		if (target instanceof Composite || !E200Types.ownStructurePointer(q)) {
 			return false;
 		}
 		DataTypeComponent first = ((Structure) q.getDataType()).getComponentAt(0);
 		return first != null && !(first.getDataType() instanceof DefaultDataType) &&
 			first.getLength() == target.getLength();
-	}
-
-	/**
-	 * Whether an address is in a table whose field there has no type or points to undefined,
-	 * which the decompiled code may show more of
-	 */
-	boolean openField(Address address) {
-		Table table = tableContaining(address);
-		if (table == null) {
-			return false;
-		}
-		DataType type =
-			fieldType(table, address.subtract(table.start()) % table.stride());
-		return type != null && (Undefined.isUndefined(type) ||
-			type instanceof Pointer && !E200TypeFlow.informative(type));
 	}
 
 	/**
@@ -547,28 +504,19 @@ final class E200Tables {
 					: type;
 			structure.replaceAtOffset((int) offset, replacement, replacement.getLength(),
 				c.getFieldName(), null);
-			E200DataTypes.targets(program, listing.getDataAt(table.start()), 0);
+			E200Data.targets(program, listing.getDataAt(table.start()), 0);
 			return true;
 		}
 		Data data = listing.getDataAt(table.start());
 		DataType element = ((Array) data.getDataType()).getDataType() instanceof Array a
 				? new ArrayDataType(type, a.getNumElements(), type.getLength())
 				: type;
-		try {
-			listing.clearCodeUnits(table.start(), data.getMaxAddress(), false);
-			E200DataTypes.targets(program, listing.createData(table.start(),
-				new ArrayDataType(element, table.count(), (int) table.stride())), 0);
-			return true;
-		}
-		catch (CodeUnitInsertionException e) {
-			try {
-				listing.createData(table.start(), data.getDataType());
-			}
-			catch (CodeUnitInsertionException e2) {
-				// the table could not be restored
-			}
+		if (!E200Data.replace(listing, table.start(),
+			new ArrayDataType(element, table.count(), (int) table.stride()))) {
 			return false;
 		}
+		E200Data.targets(program, listing.getDataAt(table.start()), 0);
+		return true;
 	}
 
 	/** Creates the tables that the indexed accesses show; returns how many. */
@@ -665,7 +613,7 @@ final class E200Tables {
 				return null;
 			}
 			Data existing = listing.getDataContaining(start);
-			if (existing != null && (!primitive(existing.getDataType()) ||
+			if (existing != null && (!E200Types.primitive(existing.getDataType()) ||
 				!existing.getAddress().equals(start))) {
 				return null; // an array or structure already, or inside other data
 			}
@@ -698,7 +646,7 @@ final class E200Tables {
 			Address end = start.add(count * stride - 1);
 			try {
 				listing.clearCodeUnits(start, end, false);
-				E200DataTypes.targets(program, listing.createData(start,
+				E200Data.targets(program, listing.createData(start,
 					new ArrayDataType(element, count, (int) stride, program.getDataTypeManager())),
 					0);
 			}
@@ -707,7 +655,8 @@ final class E200Tables {
 				return null;
 			}
 			if (!single) {
-				label();
+				E200Data.label(program, start, "tbl_" + start.toString(false),
+					SourceType.ANALYSIS);
 			}
 			layoutOffsets.addAll(layout.keySet());
 			return new Table(start, stride, count);
@@ -740,22 +689,6 @@ final class E200Tables {
 				}
 			}
 			return true;
-		}
-
-		/** Labels the table tbl_ADDRESS, unless it has a name already */
-		private void label() {
-			SymbolTable symbols = program.getSymbolTable();
-			Symbol primary = symbols.getPrimarySymbol(start);
-			if (primary != null && primary.getSource() != SourceType.DEFAULT) {
-				return;
-			}
-			try {
-				symbols.createLabel(start, "tbl_" + start.toString(false), SourceType.ANALYSIS)
-						.setPrimary();
-			}
-			catch (InvalidInputException e) {
-				// keep the default label
-			}
 		}
 
 		/**
@@ -804,7 +737,7 @@ final class E200Tables {
 				}
 			}
 			DataType type = types.isEmpty() || untyped ? null
-					: E200DataTypes.chooseType(pointerTypes(types), signedChar, true);
+					: E200Types.chooseType(pointerTypes(types), signedChar, true);
 			return type != null && type.getLength() == size ? type
 					: Undefined.getUndefinedDataType(size);
 		}
@@ -829,7 +762,7 @@ final class E200Tables {
 			while (it.hasNext()) {
 				Address a = it.next();
 				for (Reference ref : references.getReferencesTo(a)) {
-					int size = accessSize(listing.getInstructionAt(ref.getFromAddress()));
+					int size = E200Code.accessSize(listing.getInstructionAt(ref.getFromAddress()));
 					if (size > 0) {
 						sizes.merge(a.subtract(start) % stride, size,
 							(x, y) -> x.equals(y) ? x : -1);
@@ -847,7 +780,7 @@ final class E200Tables {
 					continue; // a field there already, or accesses of several sizes
 				}
 				Data data = listing.getDefinedDataAt(start.add(offset));
-				layout.put(offset, data != null && primitive(data.getDataType()) &&
+				layout.put(offset, data != null && E200Types.primitive(data.getDataType()) &&
 					!Undefined.isUndefined(data.getDataType()) && data.getLength() == size
 							? data.getDataType()
 							: Undefined.getUndefinedDataType(size));
@@ -865,18 +798,18 @@ final class E200Tables {
 			DataTypeManager manager = program.getDataTypeManager();
 			String name = "S_" + start.toString(false);
 			StructureDataType structure =
-				new StructureDataType(CATEGORY, name, (int) stride, manager);
+				new StructureDataType(E200Types.CATEGORY, name, (int) stride, manager);
 			for (Map.Entry<Long, DataType> e : layout.entrySet()) {
 				structure.replaceAtOffset(e.getKey().intValue(), e.getValue(),
 					e.getValue().getLength(), "f" + Long.toHexString(e.getKey()), null);
 			}
-			DataType old = manager.getDataType(CATEGORY, name);
+			DataType old = manager.getDataType(E200Types.CATEGORY, name);
 			if (old != null) {
 				if (old.isEquivalent(structure)) {
 					return old;
 				}
 				try {
-					structure.setName(manager.getUniqueName(CATEGORY, name));
+					structure.setName(manager.getUniqueName(E200Types.CATEGORY, name));
 				}
 				catch (InvalidNameException e) {
 					return null;
@@ -900,7 +833,7 @@ final class E200Tables {
 				conflict = index(code.next().getAddress());
 			}
 			for (Data data : listing.getDefinedData(range, true)) {
-				if (!primitive(data.getDataType()) ||
+				if (!E200Types.primitive(data.getDataType()) ||
 					!fits(element, offset(data.getAddress()), data.getLength())) {
 					conflict = Math.min(conflict, index(data.getAddress()));
 					break;
@@ -924,7 +857,7 @@ final class E200Tables {
 				Address a = it.next();
 				for (Reference ref : references.getReferencesTo(a)) {
 					accessed.computeIfAbsent(a, x -> new ArrayList<>())
-							.add(accessSize(listing.getInstructionAt(ref.getFromAddress())));
+							.add(E200Code.accessSize(listing.getInstructionAt(ref.getFromAddress())));
 				}
 			}
 			// pointers in data that is not typed yet, as in configuration tables
@@ -1037,35 +970,5 @@ final class E200Tables {
 				return offset == 0 && (size == 0 || size == type.getLength());
 			}
 		}
-	}
-
-	/** Whether a type is a single value: an integer, float, pointer, or undefined */
-	static boolean primitive(DataType type) {
-		DataType base = type instanceof TypeDef t ? t.getBaseDataType() : type;
-		return base instanceof AbstractIntegerDataType || base instanceof AbstractFloatDataType ||
-			base instanceof Pointer || base instanceof Undefined ||
-			base instanceof DefaultDataType || base instanceof Enum;
-	}
-
-	/** The size of the one load or store of an instruction, or 0 */
-	private static int accessSize(Instruction instruction) {
-		if (instruction == null) {
-			return 0;
-		}
-		int size = 0;
-		for (PcodeOp op : instruction.getPcode()) {
-			int s = switch (op.getOpcode()) {
-				case PcodeOp.LOAD -> op.getOutput().getSize();
-				case PcodeOp.STORE -> op.getInput(2).getSize();
-				default -> 0;
-			};
-			if (s != 0) {
-				if (size != 0) {
-					return 0;
-				}
-				size = s;
-			}
-		}
-		return size;
 	}
 }
