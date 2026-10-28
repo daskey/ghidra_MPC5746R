@@ -350,6 +350,8 @@ final class E200DataTypes {
 		Map<Address, List<Use>> undefined = new TreeMap<>(); // uses where there is no data
 		// addresses used as pointers to a type of another size than the undefined data there
 		Map<Address, List<Use>> mismatched = new TreeMap<>();
+		// undefined data that code accesses as it is, typed or not
+		Set<Address> accessedAsIs = new HashSet<>();
 		// addresses passed as pointers to a structure of the analyzer's
 		Map<Address, Structure> structures = new HashMap<>();
 		Set<Address> conflicting = new HashSet<>();
@@ -383,6 +385,10 @@ final class E200DataTypes {
 					mismatched.computeIfAbsent(use.address(), a -> new ArrayList<>()).add(use);
 				}
 				else if (Undefined.isUndefined(data.getDataType()) &&
+					use.access() != Access.ADDRESS && use.size() == data.getLength()) {
+					accessedAsIs.add(use.address());
+				}
+				if (data != null && Undefined.isUndefined(data.getDataType()) &&
 					use.type() != null && use.type().getLength() == data.getLength()) {
 					if (!Undefined.isUndefined(use.type())) {
 						uses.computeIfAbsent(use.address(), a -> new ArrayList<>())
@@ -399,7 +405,8 @@ final class E200DataTypes {
 		// the data as it is: a byte that code reads and a function writes as a halfword with
 		// its complement stays a byte, for the structure of the pieces
 		for (Map.Entry<Address, List<Use>> e : mismatched.entrySet()) {
-			if (!uses.containsKey(e.getKey()) && !accessed(program, e.getKey())) {
+			if (!accessedAsIs.contains(e.getKey()) && !uses.containsKey(e.getKey()) &&
+				!accessed(program, e.getKey())) {
 				undefined.computeIfAbsent(e.getKey(), a -> new ArrayList<>()).addAll(e.getValue());
 			}
 		}
