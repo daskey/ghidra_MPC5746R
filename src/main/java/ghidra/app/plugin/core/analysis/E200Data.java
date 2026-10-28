@@ -81,9 +81,10 @@ final class E200Data {
 
 	/**
 	 * Gives the data at an address that code passes as a pointer to a structure that
-	 * structure, where there are only single values there, at fields of their size, or
-	 * structures of the analyzer's that lie inside it (the larger structure wins, whichever
-	 * is applied first); returns whether it did. The data its pointer fields point to gets the
+	 * structure, where there are only single values there, at fields of their size, pointers
+	 * to nothing in particular that the reference analysis guessed, or structures of the
+	 * analyzer's that lie inside it (the larger structure wins, whichever is applied first);
+	 * returns whether it did. The data its pointer fields point to gets the
 	 * pointed-to type (see {@link #targets}).
 	 */
 	static boolean structureAt(Program program, Address address, Structure s) {
@@ -117,6 +118,9 @@ final class E200Data {
 			}
 			if (smallerStructure(d, s)) {
 				continue; // a structure of the analyzer's inside this one: the larger wins
+			}
+			if (t instanceof Pointer p && !E200Types.informative(p)) {
+				continue; // a guess of the reference analysis at a value that is an address
 			}
 			// an array of single values is its elements; one of integers is what a copy loop
 			// made of the structure, and says nothing about its fields

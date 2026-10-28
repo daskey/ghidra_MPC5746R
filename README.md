@@ -220,7 +220,9 @@ functions, runs the parts below in rounds and logs what they did:
   to gets that type. A pointer that code indexes and reads at the element and the next one,
   as `p[i]` and `p[i + 1]`, points to elements of that type, not to a structure of two
   fields. A structure built in an early round, from the functions decompiled
-  then, gets the field types that later rounds show. The places that are passed the address of the same
+  then, gets the field types that later rounds show (a pointer to a single value becomes a
+  pointer to a structure of the analyzer's whose first field that value is, once a later
+  round sees the pointer cast to the structure). The places that are passed the address of the same
   global, as the parameters of the functions that initialize, run and read one module's
   instance, point to data of one layout: their groups are one group, with one structure,
   where their shapes fit together (fields that overlap are the same field, or bytes of it).
@@ -256,6 +258,9 @@ functions, runs the parts below in rounds and logs what they did:
   each instance the type whose size fits, and an integer field whose value says which size
   is its selector (`element size by f10`). The axes and values of the calibration maps and
   curves then decompile as `float[18]`, `float[20]` and `byte[360]` at their descriptors.
+  Stray instructions in the way, of no function and with nothing flowing to them, are
+  calibration data that was disassembled and are replaced, as are, where a count field gives
+  the length, the strings the string analysis made of the values.
 - **Pointers to functions** (`E200FunctionPointers.java`): a pointer in flash, an element of
   an array of pointers or a pointer field of a structure whose values are all entry points of
   functions (or null) gets a pointer to a function definition: the functions' signature where
