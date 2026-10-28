@@ -189,7 +189,9 @@ decompiles every function and is the longest part of the analysis):
   pointed-to type: Ghidra's reference analysis would otherwise take an undefined target for
   a pointer if its value is an address, as the float 2.0 (0x40000000, the start of SRAM)
   is, or for code. Addresses used as pointers to a type get data of that type, as in
-  `FUN_08faf3e0(&SHORT_09294ba0, x)`.
+  `FUN_08faf3e0(&SHORT_09294ba0, x)`, also where the reference analysis left undefined data
+  of another size at an address an instruction only forms, as long as nothing accesses that
+  data as it is.
 - **Values passed between functions**: a function that only stores, passes on or returns a
   value gives it no type, but the value has one where it comes from or goes to. Globals,
   parameters and return values are linked where decompiled code copies a value from one to
@@ -207,7 +209,10 @@ decompiles every function and is the longest part of the analysis):
   `byte *`; a pointer indexed with several strides, as the data of a lookup table whose
   element type a field selects, is a `void *`; and a group with a place that gets a
   constant that is no address (an error code passed where other callers pass a pointer)
-  gets no structure, and no pointer type. The places that are passed the address of the same
+  gets no structure, and no pointer type. A pointer field whose target is such a run of
+  bytes is a `byte *`, and one that code only passes to a function that knows what it points
+  to gets that type. A structure built in an early round, from the functions decompiled
+  then, gets the field types that later rounds show. The places that are passed the address of the same
   global, as the parameters of the functions that initialize, run and read one module's
   instance, point to data of one layout: their groups are one group, with one structure,
   where their shapes fit together (fields that overlap are the same field, or bytes of it).
@@ -234,7 +239,13 @@ decompiles every function and is the longest part of the analysis):
   (the handlers in a table are called alike), as long as it is plausible for C (a
   hand-written routine that reads all the argument registers gets eight from Decompiler
   Parameter ID). Handlers called through tables then decompile as
-  `(*tbl_08fab6f4[i].f4)(x)` instead of `(*(code *)tbl_08fab6f4[i].f4)(x)`.
+  `(*tbl_08fab6f4[i].f4)(x)` instead of `(*(code *)tbl_08fab6f4[i].f4)(x)`. A parameter,
+  global, return value or structure field that code calls through, or that gets the entry
+  point of a function (`PTR_40008000 = FUN_08fa1234`, `f(handler)`), gets a pointer to a
+  function definition too: the functions' where they are known and agree, else one with the
+  arguments of the calls, named after its prototype (`F_void_byte_uint`). Its parameters
+  have the sizes of the arguments: the decompiler dies on a call through a definition whose
+  parameter is wider than the argument.
 - **Signedness and width of integers** (`E200Integers.java`): the decompiler infers integer
   types before it removes dead code, and `se_cmp`, `se_cmpi` and `e_cmpi`, which compilers
   also use to test for equality, set the less and greater bits with signed comparisons, so
@@ -246,7 +257,11 @@ decompiles every function and is the longest part of the analysis):
   before every use (`param_1 & 0xff`) is a `byte` or `ushort` (Decompiler Parameter ID gives
   it the register's four bytes), and so is a return value that every caller uses so, or
   that the function itself extends from a byte or halfword on every return (`return
-  (uint)BYTE_4000e5d8;` returns a `byte`, whatever the callers do with the register).
+  (uint)BYTE_4000e5d8;` returns a `byte`, whatever the callers do with the register). A
+  value that a function only passes on to another function or returns has the width of the
+  place it goes to, and a parameter whose uses say nothing, as one the function ignores, the
+  width of the values its callers pass, when all of them are small constants or values
+  extended from a byte or halfword.
 - New types change the decompiled code of the functions that use them, so the analyzer
   decompiles again those that still use undefined places or table fields, or use a place
   now typed as a pointer (which shows the data it points to), three rounds at most, and
@@ -294,17 +309,17 @@ decompiled, per image:
 
 | | Mean | Range |
 |---|---|---|
-| Functions | 14,488 | 13,954-14,978 |
-| Instructions | 446,148 | 419,347-465,307 |
+| Functions | 14,487 | 13,953-14,977 |
+| Instructions | 446,151 | 419,350-465,310 |
 | Decompiler failures | 0 | 0 |
-| Functions with decompiler warnings | 93 | 90-96 |
-| Functions with `undefined` in their signature | 33 | 33 |
+| Functions with decompiler warnings | 92 | 89-95 |
+| Functions with `undefined` in their signature | 31 | 31 |
 | Functions with `extraout_` variables | 31 | 30-31 |
-| `undefinedN` in the C | 1,338 | 1,331-1,344 |
-| `DAT_` references in the C | 476 | 468-485 |
-| Pointer casts in the C | 4,850 | 4,650-4,990 |
-| Calls through `(code *)` casts | 119 | 119-120 |
-| Analysis time (2 CPUs) | 253 s | 237-270 s |
+| `undefinedN` in the C | 1,330 | 1,324-1,335 |
+| `DAT_` references in the C | 451 | 442-461 |
+| Pointer casts in the C | 4,594 | 4,394-4,732 |
+| Calls through `(code *)` casts | 29 | 29 |
+| Analysis time (2 CPUs) | 301 s | 279 s-318 s |
 
 Most decompiler warnings are about infinite loops (halt loops) and unreachable blocks the
 decompiler removes; the `extraout_` and `undefined` signatures are in hand-written

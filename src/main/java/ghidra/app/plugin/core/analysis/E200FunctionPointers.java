@@ -21,8 +21,11 @@ import ghidra.program.model.address.Address;
 import ghidra.program.model.data.*;
 import ghidra.program.model.listing.*;
 import ghidra.program.model.mem.MemoryBlock;
+import ghidra.program.model.pcode.PcodeOp;
+import ghidra.program.model.pcode.Varnode;
 import ghidra.program.model.scalar.Scalar;
 import ghidra.program.model.util.CodeUnitInsertionException;
+import ghidra.util.InvalidNameException;
 import ghidra.util.exception.CancelledException;
 import ghidra.util.task.TaskMonitor;
 
@@ -36,7 +39,9 @@ import ghidra.util.task.TaskMonitor;
  * of pointers or a pointer field of a structure whose values in flash are all entry points of
  * functions (or null) gets a pointer to a function definition: the functions' signature where
  * they all have the same, otherwise one with their number of parameters and no types. The
- * decompiler then shows {@code (*PTR_ARRAY_090e07a4[mode])()}.
+ * decompiler then shows {@code (*PTR_ARRAY_090e07a4[mode])()}. The places whose values code
+ * calls through, or that get the entry point of a function, are typed by {@link E200TypeFlow}
+ * with the definitions of {@link Definitions}.
  */
 final class E200FunctionPointers {
 
@@ -60,7 +65,7 @@ final class E200FunctionPointers {
 		Listing listing = program.getListing();
 		FunctionManager functions = program.getFunctionManager();
 		DataTypeManager manager = program.getDataTypeManager();
-		Map<String, FunctionDefinition> definitions = new HashMap<>();
+		Definitions definitions = new Definitions(program);
 		// the instances of each structure the analyzer made, in flash
 		Map<Structure, List<Data>> instances = new LinkedHashMap<>();
 		// the data to retype, after the iteration over the listing
@@ -91,8 +96,7 @@ final class E200FunctionPointers {
 						for (int i = 0; i < data.getNumComponents() && targets != null; i++) {
 							targets = target(functions, data.getComponent(i), targets);
 						}
-						FunctionDefinition definition =
-							definition(manager, definitions, targets);
+						FunctionDefinition definition = definitions.forTargets(targets);
 						if (definition != null) {
 							replacements.put(data.getAddress(), new ArrayDataType(
 								new PointerDataType(definition, 4, manager),
@@ -104,8 +108,8 @@ final class E200FunctionPointers {
 					instances.computeIfAbsent((Structure) type, s -> new ArrayList<>()).add(data);
 				}
 				else if (untypedPointer(type)) {
-					FunctionDefinition definition = definition(manager, definitions,
-						target(functions, data, new ArrayList<>()));
+					FunctionDefinition definition =
+						definitions.forTargets(target(functions, data, new ArrayList<>()));
 					if (definition != null) {
 						replacements.put(data.getAddress(),
 							new PointerDataType(definition, 4, manager));
@@ -140,7 +144,7 @@ final class E200FunctionPointers {
 						break;
 					}
 				}
-				FunctionDefinition definition = definition(manager, definitions, targets);
+				FunctionDefinition definition = definitions.forTargets(targets);
 				if (definition != null) {
 					s.replaceAtOffset(c.getOffset(), new PointerDataType(definition, 4, manager),
 						4, c.getFieldName(), c.getComment());
@@ -172,8 +176,7 @@ final class E200FunctionPointers {
 	 * Adds the function a datum's value points to, to the list; null (a null pointer) adds
 	 * nothing; returns null if the value is neither
 	 */
-	private static List<Function> target(FunctionManager functions, Data data,
-			List<Function> targets) {
+	static List<Function> target(FunctionManager functions, Data data, List<Function> targets) {
 		if (targets == null || data.getLength() != 4) {
 			return null;
 		}
@@ -203,75 +206,295 @@ final class E200FunctionPointers {
 	}
 
 	/**
-	 * The function definition for pointers to the functions: their signature if they all have
-	 * one, else one with the number of parameters most of them have (the handlers in a table
-	 * are called alike, and Decompiler Parameter ID gives one of them a parameter it reads
-	 * but does not use) and undefined types; null if there are none, or no number of
-	 * parameters is in the majority
+	 * A call through a pointer: the sizes and the types of its arguments (null for a
+	 * constant), and the size and type of its result if the result is used
 	 */
-	private static FunctionDefinition definition(DataTypeManager manager,
-			Map<String, FunctionDefinition> definitions, List<Function> targets) {
-		if (targets == null || targets.isEmpty()) {
-			return null;
-		}
-		List<Integer> counts = new ArrayList<>();
-		for (Function f : targets) {
-			counts.add(f.getParameterCount());
-		}
-		int parameterCount = E200DataTypes.mostFrequent(counts);
-		if (parameterCount > MAX_PARAMETERS ||
-			Collections.frequency(counts, parameterCount) * 2 <= targets.size() &&
-				Collections.frequency(counts, parameterCount) < targets.size()) {
-			return null;
-		}
-		Function first = null;
-		boolean same = true;
-		boolean returnsNothing = true;
-		for (Function f : targets) {
-			if (f.getParameterCount() != parameterCount) {
-				same = false;
-				continue;
+	record Call(int[] sizes, DataType[] types, int resultSize, DataType resultType) {
+		static Call of(PcodeOp call) {
+			int n = call.getNumInputs() - 1;
+			int[] sizes = new int[n];
+			DataType[] types = new DataType[n];
+			for (int i = 0; i < n; i++) {
+				Varnode v = call.getInput(i + 1);
+				sizes[i] = v.getSize();
+				types[i] = v.isConstant() ? null : E200Integers.of(v);
 			}
-			if (first == null) {
-				first = f;
+			Varnode out = call.getOutput();
+			return new Call(sizes, types, out == null ? 0 : out.getSize(),
+				out == null ? null : E200Integers.of(out));
+		}
+
+		boolean returns() {
+			return resultSize > 0;
+		}
+	}
+
+	/**
+	 * The function definitions of the analyzer's category, one per prototype. For pointers
+	 * to known functions, their signature if they all have one; otherwise, and for pointers
+	 * code only calls through, one with the number of parameters most of the functions or
+	 * calls have, each parameter typed as they agree, or as the unsigned integer of the size
+	 * they agree on. A definition whose parameters are not the size of the arguments passed
+	 * through the pointer is not used: the decompiler cannot pass a byte where the prototype
+	 * says a word.
+	 */
+	static final class Definitions {
+		private final Program program;
+		private final DataTypeManager manager;
+		private final boolean signedChar;
+		private final Map<String, FunctionDefinition> byPrototype = new HashMap<>();
+
+		Definitions(Program program) {
+			this.program = program;
+			this.manager = program.getDataTypeManager();
+			this.signedChar = manager.getDataOrganization().isSignedChar();
+			Category category = manager.getCategory(CATEGORY);
+			if (category != null) {
+				for (DataType t : category.getDataTypes()) {
+					if (t instanceof FunctionDefinition d) {
+						byPrototype.putIfAbsent(key(d), d);
+					}
+				}
 			}
-			else if (!first.getSignature().isEquivalentSignature(f.getSignature())) {
-				same = false;
+		}
+
+		/**
+		 * The definition for pointers to the functions; null if there are none, or no number
+		 * of parameters is in the majority, or that number is implausible for C, or the
+		 * functions with that number disagree on the size of a parameter or of the result
+		 */
+		FunctionDefinition forTargets(Collection<Function> targets) {
+			if (targets == null || targets.isEmpty()) {
+				return null;
 			}
-			if (!(f.getReturnType() instanceof VoidDataType)) {
-				returnsNothing = false;
+			List<Integer> counts = new ArrayList<>();
+			for (Function f : targets) {
+				counts.add(f.getParameterCount());
 			}
-		}
-		String name = manager.getUniqueName(CATEGORY, "F_" + first.getEntryPoint().toString(false));
-		FunctionDefinitionDataType definition;
-		if (same) {
-			definition =
-				new FunctionDefinitionDataType(CATEGORY, name, first.getSignature(), manager);
-		}
-		else {
-			definition = new FunctionDefinitionDataType(CATEGORY, name, manager);
-			ParameterDefinition[] parameters = new ParameterDefinition[parameterCount];
-			for (int i = 0; i < parameters.length; i++) {
-				parameters[i] = new ParameterDefinitionImpl(null,
-					Undefined4DataType.dataType, null);
+			int parameterCount = E200DataTypes.mostFrequent(counts);
+			if (parameterCount > MAX_PARAMETERS ||
+				Collections.frequency(counts, parameterCount) * 2 <= targets.size() &&
+					Collections.frequency(counts, parameterCount) < targets.size()) {
+				return null;
 			}
-			definition.setArguments(parameters);
-			definition.setReturnType(
-				returnsNothing ? VoidDataType.dataType : Undefined4DataType.dataType);
+			Function first = null;
+			boolean same = true;
+			List<List<DataType>> parameters = new ArrayList<>();
+			for (int i = 0; i < parameterCount; i++) {
+				parameters.add(new ArrayList<>());
+			}
+			List<DataType> returns = new ArrayList<>();
+			List<Function> sorted = new ArrayList<>(targets); // named after the lowest
+			sorted.sort(Comparator.comparing(Function::getEntryPoint));
+			for (Function f : sorted) {
+				if (f.getParameterCount() != parameterCount) {
+					same = false;
+					continue;
+				}
+				if (first == null) {
+					first = f;
+				}
+				else if (!first.getSignature().isEquivalentSignature(f.getSignature())) {
+					same = false;
+				}
+				for (int i = 0; i < parameterCount; i++) {
+					parameters.get(i).add(f.getParameter(i).getDataType());
+				}
+				returns.add(f.getReturnType());
+			}
+			if (same) {
+				return add(new FunctionDefinitionDataType(CATEGORY,
+					"F_" + first.getEntryPoint().toString(false), first.getSignature(), manager));
+			}
+			return definition(parameters, returns);
 		}
-		// one definition per prototype
-		StringBuilder key = new StringBuilder(definition.getReturnType().getPathName());
-		key.append(' ').append(definition.getCallingConventionName()).append('(');
-		for (ParameterDefinition p : definition.getArguments()) {
-			key.append(p.getDataType().getPathName()).append(',');
+
+		/**
+		 * The definition for pointers that code calls through {@code calls}; null if the
+		 * calls with the most frequent number of arguments disagree on the size of one, or
+		 * of the result, or that number is implausible for C
+		 */
+		FunctionDefinition forCalls(Collection<Call> calls) {
+			if (calls.isEmpty()) {
+				return null;
+			}
+			List<Integer> counts = new ArrayList<>();
+			for (Call c : calls) {
+				counts.add(c.sizes().length);
+			}
+			int parameterCount = E200DataTypes.mostFrequent(counts);
+			if (parameterCount > MAX_PARAMETERS) {
+				return null;
+			}
+			List<List<DataType>> parameters = new ArrayList<>();
+			for (int i = 0; i < parameterCount; i++) {
+				parameters.add(new ArrayList<>());
+			}
+			List<DataType> returns = new ArrayList<>();
+			boolean returns1 = false;
+			for (Call c : calls) {
+				if (c.sizes().length != parameterCount) {
+					continue;
+				}
+				for (int i = 0; i < parameterCount; i++) {
+					DataType t = c.types()[i];
+					parameters.get(i).add(t != null && t.getLength() == c.sizes()[i] ? t
+							: Undefined.getUndefinedDataType(c.sizes()[i]));
+				}
+				if (c.returns()) {
+					returns1 = true;
+					DataType t = c.resultType();
+					returns.add(t != null && t.getLength() == c.resultSize() ? t
+							: Undefined.getUndefinedDataType(c.resultSize()));
+				}
+			}
+			if (!returns1) {
+				returns.add(VoidDataType.dataType);
+			}
+			return definition(parameters, returns);
 		}
-		FunctionDefinition existing = definitions.get(key.toString());
-		if (existing == null) {
-			existing = (FunctionDefinition) manager.addDataType(definition,
-				DataTypeConflictHandler.DEFAULT_HANDLER);
-			definitions.put(key.toString(), existing);
+
+		/**
+		 * A definition with the parameters and the return type the lists agree on: the type
+		 * if all agree, else the unsigned integer of the size if all have one size; null
+		 * otherwise. Returns are void if all are, else the types of the others.
+		 */
+		private FunctionDefinition definition(List<List<DataType>> parameters,
+				List<DataType> returns) {
+			ParameterDefinition[] arguments = new ParameterDefinition[parameters.size()];
+			for (int i = 0; i < arguments.length; i++) {
+				DataType type = agreed(parameters.get(i));
+				if (type == null) {
+					return null;
+				}
+				arguments[i] = new ParameterDefinitionImpl(null, type, null);
+			}
+			List<DataType> values = new ArrayList<>();
+			for (DataType t : returns) {
+				if (t != null && !(t instanceof VoidDataType) && !(t instanceof DefaultDataType)) {
+					values.add(t);
+				}
+			}
+			DataType returned = values.isEmpty() ? VoidDataType.dataType : agreed(values);
+			if (returned == null) {
+				return null;
+			}
+			FunctionDefinitionDataType definition =
+				new FunctionDefinitionDataType(CATEGORY, "F", manager);
+			definition.setArguments(arguments);
+			definition.setReturnType(returned);
+			StringBuilder name = new StringBuilder("F_").append(typeName(returned));
+			for (ParameterDefinition p : arguments) {
+				name.append('_').append(typeName(p.getDataType()));
+			}
+			try {
+				definition.setName(name.toString());
+			}
+			catch (InvalidNameException e) {
+				return null;
+			}
+			return add(definition);
 		}
-		return existing;
+
+		/**
+		 * The type a list of types agrees on: the one they all are, or the unsigned integer
+		 * of their size when they are all of one size of 1, 2, 4 or 8 bytes; null otherwise
+		 */
+		private DataType agreed(List<DataType> types) {
+			if (types.isEmpty()) {
+				return null;
+			}
+			int size = types.get(0).getLength();
+			List<DataType> informative = new ArrayList<>();
+			for (DataType t : types) {
+				if (t == null || t.getLength() != size) {
+					return null;
+				}
+				if (E200TypeFlow.informative(t)) {
+					informative.add(t);
+				}
+			}
+			DataType type = informative.size() == types.size()
+					? E200DataTypes.chooseType(informative, signedChar, true)
+					: null;
+			return type != null ? type : E200DataTypes.unsigned(size);
+		}
+
+		private static String typeName(DataType t) {
+			if (t instanceof Pointer p) {
+				return (p.getDataType() == null ? "void" : typeName(p.getDataType())) + "_ptr";
+			}
+			return t.getName().replaceAll("[^A-Za-z0-9_]", "");
+		}
+
+		/**
+		 * Whether a definition fits the calls through a pointer: the arguments it and a call
+		 * have at the same position are of one size, and a call's result is one it returns,
+		 * of its size
+		 */
+		static boolean fits(FunctionDefinition d, Collection<Call> calls) {
+			ParameterDefinition[] arguments = d.getArguments();
+			for (Call c : calls) {
+				for (int i = 0; i < Math.min(arguments.length, c.sizes().length); i++) {
+					if (arguments[i].getDataType().getLength() != c.sizes()[i]) {
+						return false;
+					}
+				}
+				if (c.returns() && (d.getReturnType() instanceof VoidDataType ||
+					d.getReturnType().getLength() != c.resultSize())) {
+					return false;
+				}
+			}
+			return true;
+		}
+
+		/**
+		 * The definition for a place that holds pointers to {@code targets} (the entry points
+		 * of functions) or that code calls through ({@code calls}): from the functions where
+		 * there are any, they agree and the calls fit, else from the calls; null if neither
+		 * gives one
+		 */
+		FunctionDefinition of(Collection<Address> targets, Collection<Call> calls) {
+			List<Function> functions = new ArrayList<>();
+			for (Address a : targets) {
+				Function f = program.getFunctionManager().getFunctionAt(a);
+				if (f != null) {
+					functions.add(f.isThunk() ? f.getThunkedFunction(true) : f);
+				}
+			}
+			FunctionDefinition definition = forTargets(functions);
+			if (definition != null && fits(definition, calls)) {
+				return definition;
+			}
+			return forCalls(calls);
+		}
+
+		/** One definition per prototype, in the data type manager */
+		private FunctionDefinition add(FunctionDefinitionDataType definition) {
+			String key = key(definition);
+			FunctionDefinition existing = byPrototype.get(key);
+			if (existing == null) {
+				try {
+					definition.setName(manager.getUniqueName(CATEGORY, definition.getName()));
+				}
+				catch (InvalidNameException e) {
+					return null;
+				}
+				existing = (FunctionDefinition) manager.addDataType(definition,
+					DataTypeConflictHandler.DEFAULT_HANDLER);
+				byPrototype.put(key, existing);
+			}
+			return existing;
+		}
+
+		private static String key(FunctionDefinition definition) {
+			StringBuilder key = new StringBuilder(definition.getReturnType().getPathName());
+			key.append(' ').append(definition.getCallingConventionName()).append('(');
+			for (ParameterDefinition p : definition.getArguments()) {
+				key.append(p.getDataType().getPathName()).append(',');
+			}
+			return key.toString();
+		}
 	}
 
 	/** Replaces a datum with one of the given type; returns whether it did */

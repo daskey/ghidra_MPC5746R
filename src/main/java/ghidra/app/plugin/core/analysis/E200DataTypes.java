@@ -63,7 +63,8 @@ import ghidra.util.task.TaskMonitor;
  * others get data of the element size or of the size of the pointer's target, typed from
  * the uses, so that the decompiler shows {@code (&BYTE_4000e46e)[i]} instead of
  * {@code *(undefined1 *)(i + 0x4000e46e)} and {@code &SHORT_09294ba0} instead of
- * {@code (short *)&DAT_09294ba0}.
+ * {@code (short *)&DAT_09294ba0}; undefined data of another size than the pointer's target,
+ * as the reference analysis makes of an address an instruction forms, is replaced.
  * <p>
  * Parameters and return values that the functions only copy, and globals they are copied
  * to and from, get the types the values have where they come from or go to (see
@@ -347,6 +348,10 @@ final class E200DataTypes {
 		}
 		Map<Address, List<DataType>> uses = new HashMap<>();
 		Map<Address, List<Use>> undefined = new TreeMap<>(); // uses where there is no data
+		// addresses used as pointers to a type of another size than the undefined data there
+		Map<Address, List<Use>> mismatched = new TreeMap<>();
+		// undefined data that code accesses as it is, typed or not
+		Set<Address> accessedAsIs = new HashSet<>();
 		// addresses passed as pointers to a structure of the analyzer's
 		Map<Address, Structure> structures = new HashMap<>();
 		Set<Address> conflicting = new HashSet<>();
@@ -373,7 +378,17 @@ final class E200DataTypes {
 				if (data == null) {
 					undefined.computeIfAbsent(use.address(), a -> new ArrayList<>()).add(use);
 				}
+				else if (use.access() == Access.ADDRESS &&
+					Undefined.isUndefined(data.getDataType()) && use.type() != null &&
+					E200TypeFlow.informative(use.type()) &&
+					use.type().getLength() != data.getLength()) {
+					mismatched.computeIfAbsent(use.address(), a -> new ArrayList<>()).add(use);
+				}
 				else if (Undefined.isUndefined(data.getDataType()) &&
+					use.access() != Access.ADDRESS && use.size() == data.getLength()) {
+					accessedAsIs.add(use.address());
+				}
+				if (data != null && Undefined.isUndefined(data.getDataType()) &&
 					use.type() != null && use.type().getLength() == data.getLength()) {
 					if (!Undefined.isUndefined(use.type())) {
 						uses.computeIfAbsent(use.address(), a -> new ArrayList<>())
@@ -383,6 +398,16 @@ final class E200DataTypes {
 						elements.type(new E200TypeFlow.Global(use.address()), use.type());
 					}
 				}
+			}
+		}
+		// undefined data of another size than the pointer's target, as the reference analysis
+		// makes of an address an instruction only forms, is replaced where nothing accesses
+		// the data as it is: a byte that code reads and a function writes as a halfword with
+		// its complement stays a byte, for the structure of the pieces
+		for (Map.Entry<Address, List<Use>> e : mismatched.entrySet()) {
+			if (!accessedAsIs.contains(e.getKey()) && !uses.containsKey(e.getKey()) &&
+				!accessed(program, e.getKey())) {
+				undefined.computeIfAbsent(e.getKey(), a -> new ArrayList<>()).addAll(e.getValue());
 			}
 		}
 		boolean signedChar = program.getDataTypeManager().getDataOrganization().isSignedChar();
@@ -741,9 +766,10 @@ final class E200DataTypes {
 			}
 			try {
 				Address end = base.addNoWrap(size - 1);
-				if (!block.contains(end) || !listing.isUndefined(base, end)) {
+				if (!block.contains(end) || !onlyUndefined(listing, base, end)) {
 					continue;
 				}
+				listing.clearCodeUnits(base, end, false);
 				listing.createData(base, Undefined.getUndefinedDataType(size));
 			}
 			catch (AddressOverflowException | CodeUnitInsertionException ex) {
@@ -763,10 +789,47 @@ final class E200DataTypes {
 		return created;
 	}
 
+	/** Whether an instruction reads or writes the data at an address */
+	private static boolean accessed(Program program, Address address) {
+		for (Reference ref : program.getReferenceManager().getReferencesTo(address)) {
+			if (ref.getReferenceType().isRead() || ref.getReferenceType().isWrite()) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	/**
+	 * Whether a range holds nothing but undefined bytes and data of undefined type that
+	 * starts and ends within it
+	 */
+	private static boolean onlyUndefined(Listing listing, Address start, Address end) {
+		if (listing.isUndefined(start, end)) {
+			return true;
+		}
+		AddressSet range = new AddressSet(start, end);
+		if (listing.getInstructions(range, true).hasNext()) {
+			return false;
+		}
+		Data first = listing.getDataContaining(start);
+		if (first != null && !first.getAddress().equals(start)) {
+			return false;
+		}
+		for (Data d : listing.getDefinedData(range, true)) {
+			DataType t = d.getDataType();
+			if (!(t instanceof Undefined || t instanceof DefaultDataType) ||
+				d.getMaxAddress().compareTo(end) > 0) {
+				return false; // typed, or an array (of undefined values too)
+			}
+		}
+		return true;
+	}
+
 	/**
 	 * Gives the data at an address that code passes as a pointer to a structure that
-	 * structure, where there are only single values there, at fields of their size; returns
-	 * whether it did
+	 * structure, where there are only single values there, at fields of their size, or
+	 * structures of the analyzer's that lie inside it (the larger structure wins, whichever
+	 * is applied first); returns whether it did
 	 */
 	static boolean structureAt(Program program, Address address, Structure s) {
 		Listing listing = program.getListing();
@@ -784,7 +847,7 @@ final class E200DataTypes {
 		}
 		Data at = listing.getDataContaining(address);
 		if (!block.contains(end) || at != null && (!at.getAddress().equals(address) ||
-			!E200Tables.primitive(at.getDataType()))) {
+			!E200Tables.primitive(at.getDataType()) && !smallerStructure(at, s))) {
 			return false;
 		}
 		AddressSet range = new AddressSet(address, end);
@@ -793,7 +856,13 @@ final class E200DataTypes {
 		}
 		for (Data d : listing.getDefinedData(range, true)) {
 			DataType t = d.getDataType();
-			if (!E200Tables.primitive(t) || d.getMaxAddress().compareTo(end) > 0) {
+			if (d.getMaxAddress().compareTo(end) > 0) {
+				return false;
+			}
+			if (smallerStructure(d, s)) {
+				continue; // a structure of the analyzer's inside this one: the larger wins
+			}
+			if (!E200Tables.primitive(t)) {
 				return false;
 			}
 			int offset = (int) d.getAddress().subtract(address);
@@ -815,6 +884,11 @@ final class E200DataTypes {
 		}
 		targets(program, listing.getDataAt(address), 0);
 		return true;
+	}
+
+	/** Whether data is a structure of the analyzer's shorter than {@code s} */
+	private static boolean smallerStructure(Data d, Structure s) {
+		return E200Tables.ownStructure(d.getDataType()) && d.getLength() < s.getLength();
 	}
 
 	/**
