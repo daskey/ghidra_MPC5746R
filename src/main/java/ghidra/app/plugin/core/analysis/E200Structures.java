@@ -87,6 +87,38 @@ final class E200Structures {
 		}
 
 		/**
+		 * Whether two shapes describe data of one layout, as the shapes of pointers to the
+		 * same global do: neither is indexed with several strides, their strides agree, and
+		 * where their fields overlap they are the same field, of one size, or bytes of a field
+		 * of the other (code reads a word and its bytes)
+		 */
+		boolean compatible(Shape other) {
+			if (mixed || other.mixed || stride != 0 && other.stride != 0 && stride != other.stride) {
+				return false;
+			}
+			for (Map.Entry<Long, Field> e : fields.entrySet()) {
+				long offset = e.getKey();
+				int size = size(e.getValue());
+				// the fields of the other shape that start in this field
+				for (Map.Entry<Long, Field> o : other.fields.subMap(offset, offset + size)
+						.entrySet()) {
+					int otherSize = size(o.getValue());
+					if (o.getKey() == offset ? otherSize != size && otherSize != 1 && size != 1
+							: otherSize != 1) {
+						return false;
+					}
+				}
+				// the field of the other shape that this field starts in
+				Map.Entry<Long, Field> before = other.fields.lowerEntry(offset);
+				if (before != null && before.getKey() + size(before.getValue()) > offset &&
+					size != 1) {
+					return false;
+				}
+			}
+			return true;
+		}
+
+		/**
 		 * Whether the pointer points to a structure: fields other than one at offset 0, and
 		 * not only bytes from offset 0 on, as code accesses a buffer, and one stride
 		 */
@@ -276,6 +308,26 @@ final class E200Structures {
 	 */
 	static Structure build(DataTypeManager manager, Shape shape, String name, boolean signedChar,
 			int depth) {
+		return build(manager, shape, name, signedChar, depth, 0);
+	}
+
+	/**
+	 * Builds the structure a shape describes, at most {@code limit} bytes long if the limit is
+	 * not 0: the fields past it, which code reads from a longer variant of the structure, are
+	 * left out.
+	 */
+	static Structure build(DataTypeManager manager, Shape shape, String name, boolean signedChar,
+			int depth, long limit) {
+		return build(manager, shape, name, signedChar, depth, limit, new TreeMap<>());
+	}
+
+	/**
+	 * Builds the structure a shape describes, with the fields that the data at its instances
+	 * shows to be in pieces split into them ({@code pieces}, by offset): code that writes a
+	 * {@code ushort} where other code reads a {@code byte} writes two fields at once.
+	 */
+	static Structure build(DataTypeManager manager, Shape shape, String name, boolean signedChar,
+			int depth, long limit, TreeMap<Long, DataType> pieces) {
 		StructureDataType structure = new StructureDataType(E200Tables.CATEGORY, name, 0, manager);
 		long end = 0;
 		Map<Long, DataType> types = new TreeMap<>();
@@ -283,8 +335,20 @@ final class E200Structures {
 			long offset = e.getKey();
 			Field f = e.getValue();
 			int size = size(f);
-			if (size == 0 || offset < end) {
-				continue; // overlaps the previous field
+			if (size == 0 || offset < end || limit > 0 && offset + size > limit) {
+				continue; // overlaps the previous field, or lies past the limit
+			}
+			Map<Long, DataType> within = pieces.subMap(offset, offset + size);
+			if (!within.isEmpty()) {
+				for (Map.Entry<Long, DataType> piece : within.entrySet()) {
+					if (piece.getKey() >= end &&
+						piece.getKey() + piece.getValue().getLength() <= offset + size) {
+						types.put(piece.getKey(), piece.getValue());
+						end = piece.getKey() + piece.getValue().getLength();
+					}
+				}
+				end = Math.max(end, offset + size);
+				continue;
 			}
 			DataType type = null;
 			if (size == 4 && !f.target.isEmpty() && depth < MAX_DEPTH) {
@@ -314,9 +378,17 @@ final class E200Structures {
 		if (types.isEmpty()) {
 			return null;
 		}
-		long length = (end + 3) & ~3L;
+		// padded to the alignment of its widest field
+		long align = 1;
+		for (DataType t : types.values()) {
+			align = Math.max(align, Math.min(4, t.getLength()));
+		}
+		long length = (end + align - 1) & -align;
 		if (shape.stride >= end) {
 			length = shape.stride;
+		}
+		if (limit > 0 && length > limit) {
+			length = Math.max(end, limit);
 		}
 		structure.growStructure((int) length);
 		for (Map.Entry<Long, DataType> e : types.entrySet()) {
