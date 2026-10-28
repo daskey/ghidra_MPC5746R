@@ -259,7 +259,11 @@ functions, runs the parts below in rounds and logs what they did:
   records it (`f0 * f2 elements`). A pointer field whose element type the code chooses at
   run time (`void *`, cast to `float *`, `ushort *` and `byte *` after indexing) gets at
   each instance the type whose size fits, and an integer field whose value says which size
-  is its selector (`element size by f10`). The axes and values of the calibration maps and
+  is its selector (`element size by f10`); the sizes the lookup's code gives the selector's
+  values, where it compares the selector with constants on the way to the casts
+  (`if (p->f10 == 8) ... (ushort *)p->fc`), come with the structure
+  (`element size by f10: 0=4, 4=1, 8=2`), for the structures whose instances do not pin
+  them. The axes and values of the calibration maps and
   curves then decompile as `float[18]`, `float[20]` and `byte[360]` at their descriptors.
   Stray instructions in the way, of no function and with nothing flowing to them, are
   calibration data that was disassembled and are replaced, as are, where a count field gives
