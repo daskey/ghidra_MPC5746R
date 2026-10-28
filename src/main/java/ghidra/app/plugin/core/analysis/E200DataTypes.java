@@ -348,6 +348,8 @@ final class E200DataTypes {
 		}
 		Map<Address, List<DataType>> uses = new HashMap<>();
 		Map<Address, List<Use>> undefined = new TreeMap<>(); // uses where there is no data
+		// addresses used as pointers to a type of another size than the undefined data there
+		Map<Address, List<Use>> mismatched = new TreeMap<>();
 		// addresses passed as pointers to a structure of the analyzer's
 		Map<Address, Structure> structures = new HashMap<>();
 		Set<Address> conflicting = new HashSet<>();
@@ -371,13 +373,14 @@ final class E200DataTypes {
 					continue;
 				}
 				Data data = listing.getDefinedDataAt(use.address());
-				if (data == null || use.access() == Access.ADDRESS &&
+				if (data == null) {
+					undefined.computeIfAbsent(use.address(), a -> new ArrayList<>()).add(use);
+				}
+				else if (use.access() == Access.ADDRESS &&
 					Undefined.isUndefined(data.getDataType()) && use.type() != null &&
 					E200TypeFlow.informative(use.type()) &&
 					use.type().getLength() != data.getLength()) {
-					// no data, or undefined data of another size than the pointer's target, as
-					// the reference analysis makes of an address an instruction forms
-					undefined.computeIfAbsent(use.address(), a -> new ArrayList<>()).add(use);
+					mismatched.computeIfAbsent(use.address(), a -> new ArrayList<>()).add(use);
 				}
 				else if (Undefined.isUndefined(data.getDataType()) &&
 					use.type() != null && use.type().getLength() == data.getLength()) {
@@ -389,6 +392,15 @@ final class E200DataTypes {
 						elements.type(new E200TypeFlow.Global(use.address()), use.type());
 					}
 				}
+			}
+		}
+		// undefined data of another size than the pointer's target, as the reference analysis
+		// makes of an address an instruction only forms, is replaced where nothing accesses
+		// the data as it is: a byte that code reads and a function writes as a halfword with
+		// its complement stays a byte, for the structure of the pieces
+		for (Map.Entry<Address, List<Use>> e : mismatched.entrySet()) {
+			if (!uses.containsKey(e.getKey()) && !accessed(program, e.getKey())) {
+				undefined.computeIfAbsent(e.getKey(), a -> new ArrayList<>()).addAll(e.getValue());
 			}
 		}
 		boolean signedChar = program.getDataTypeManager().getDataOrganization().isSignedChar();
@@ -768,6 +780,16 @@ final class E200DataTypes {
 			}
 		}
 		return created;
+	}
+
+	/** Whether an instruction reads or writes the data at an address */
+	private static boolean accessed(Program program, Address address) {
+		for (Reference ref : program.getReferenceManager().getReferencesTo(address)) {
+			if (ref.getReferenceType().isRead() || ref.getReferenceType().isWrite()) {
+				return true;
+			}
+		}
+		return false;
 	}
 
 	/**
