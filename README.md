@@ -346,16 +346,16 @@ decompiled, per image:
 | | Mean | Range |
 |---|---|---|
 | Functions | 14,487 | 13,953-14,977 |
-| Instructions | 446,151 | 419,350-465,310 |
+| Instructions | 444,107 | 418,471-462,873 |
 | Decompiler failures | 0 | 0 |
 | Functions with decompiler warnings | 92 | 89-95 |
 | Functions with `undefined` in their signature | 31 | 31 |
 | Functions with `extraout_` variables | 31 | 30-31 |
-| `undefinedN` in the C | 1,330 | 1,324-1,335 |
+| `undefinedN` in the C | 1,329 | 1,323-1,334 |
 | `DAT_` references in the C | 451 | 442-461 |
-| Pointer casts in the C | 4,594 | 4,394-4,732 |
+| Pointer casts in the C | 4,379 | 4,179-4,516 |
 | Calls through `(code *)` casts | 29 | 29 |
-| Analysis time (2 CPUs) | 301 s | 279 s-318 s |
+| Analysis time (2 CPUs) | 288 s | 260 s-309 s |
 
 Most decompiler warnings are about infinite loops (halt loops) and unreachable blocks the
 decompiler removes; the `extraout_` and `undefined` signatures are in hand-written
