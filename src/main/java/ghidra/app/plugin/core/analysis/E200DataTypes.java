@@ -268,6 +268,11 @@ final class E200DataTypes {
 						new HashSet<>(), false, passed, tables, typed, monitor);
 				}
 			}
+			int functionPointers = E200FunctionPointers.apply(program, monitor);
+			if (functionPointers > 0) {
+				Msg.info(E200Analyzer.class, "Typed " + functionPointers +
+					" pointers, array elements and structure fields in flash that point to functions");
+			}
 			if (typed[6] > 0) {
 				Msg.info(E200Analyzer.class, "Created " + typed[6] +
 					" arrays and arrays of structures that code indexes");

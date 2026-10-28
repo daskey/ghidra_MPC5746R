@@ -21,8 +21,7 @@ import ghidra.app.util.PseudoDisassembler;
 import ghidra.app.util.PseudoInstruction;
 import ghidra.program.model.address.*;
 import ghidra.program.model.listing.*;
-import ghidra.program.model.mem.Memory;
-import ghidra.program.model.mem.MemoryAccessException;
+import ghidra.program.model.mem.*;
 import ghidra.program.model.symbol.FlowType;
 import ghidra.util.Msg;
 import ghidra.util.exception.CancelledException;
@@ -77,7 +76,7 @@ final class E200CodeGaps {
 	 * Disassembles the subroutines in the gaps after the functions in {@code set} and creates
 	 * their functions; returns how many.
 	 */
-	static int findFunctions(Program program, AddressSetView set, TaskMonitor monitor)
+	static List<Address> findFunctions(Program program, AddressSetView set, TaskMonitor monitor)
 			throws CancelledException {
 		Listing listing = program.getListing();
 		AddressSetView executable = E200Analyzer.executableMemory(program);
@@ -90,13 +89,13 @@ final class E200CodeGaps {
 				}
 			}
 		}
+		List<Address> found = new ArrayList<>();
 		if (gaps.isEmpty()) {
-			return 0;
+			return found;
 		}
 		Map<String, Integer> uses = mnemonicUses(program, monitor);
 		PseudoDisassembler disassembler = new PseudoDisassembler(program);
 		AutoAnalysisManager manager = AutoAnalysisManager.getAnalysisManager(program);
-		int found = 0;
 		for (Address gap : gaps) {
 			monitor.checkCancelled();
 			List<Address> entries = findSubroutines(program, disassembler, uses, gap, executable);
@@ -106,11 +105,12 @@ final class E200CodeGaps {
 				program.getBookmarkManager()
 						.setBookmark(entry, BookmarkType.ANALYSIS, BOOKMARK_CATEGORY,
 							"Function in a gap between functions");
-				found++;
+				found.add(entry);
 			}
 		}
-		if (found > 0) {
-			Msg.info(E200Analyzer.class, "Found " + found + " functions in gaps between functions");
+		if (!found.isEmpty()) {
+			Msg.info(E200Analyzer.class,
+				"Found " + found.size() + " functions in gaps between functions");
 		}
 		return found;
 	}
@@ -244,6 +244,13 @@ final class E200CodeGaps {
 	private static Map<Address, Integer> followSubroutine(Listing listing,
 			PseudoDisassembler disassembler, Map<String, Integer> uses, Address entry,
 			AddressRange gap, Set<Address> covered) {
+		return followSubroutine(listing, disassembler, uses, entry, gap, covered,
+			MIN_INSTRUCTIONS);
+	}
+
+	private static Map<Address, Integer> followSubroutine(Listing listing,
+			PseudoDisassembler disassembler, Map<String, Integer> uses, Address entry,
+			AddressRange gap, Set<Address> covered, int minInstructions) {
 		Map<Address, Integer> body = new HashMap<>();
 		Deque<Address> todo = new ArrayDeque<>();
 		todo.push(entry);
@@ -287,7 +294,100 @@ final class E200CodeGaps {
 				ends = true;
 			}
 		}
-		return ends && body.size() >= MIN_INSTRUCTIONS ? body : null;
+		return ends && body.size() >= minInstructions ? body : null;
+	}
+
+	/**
+	 * Creates functions at the code that pointers in tables of handlers point to: an aligned
+	 * word of initialized memory whose value is an even address in executable memory outside
+	 * every function, where the bytes decode as a complete subroutine, when the word before or
+	 * after it points to a function. An empty handler, one return, matches no start pattern
+	 * and the gap rule above asks for more instructions; the table says it is a function.
+	 * Returns how many were created; {@code scheduled} are the entry points of the functions
+	 * the gap rule has just scheduled, not created yet, which need no table.
+	 */
+	static int findPointedFunctions(Program program, Collection<Address> scheduled,
+			TaskMonitor monitor) throws CancelledException {
+		Listing listing = program.getListing();
+		Memory memory = program.getMemory();
+		FunctionManager functions = program.getFunctionManager();
+		AddressSetView executable = E200Analyzer.executableMemory(program);
+		AddressSpace space = program.getAddressFactory().getDefaultAddressSpace();
+		Set<Address> candidates = new TreeSet<>();
+		byte[] bytes = new byte[0x10000];
+		for (MemoryBlock block : memory.getBlocks()) {
+			if (!block.isInitialized() || block.isVolatile() ||
+				!block.getStart().getAddressSpace().equals(space)) {
+				continue;
+			}
+			Address start = block.getStart();
+			long[] words = new long[3]; // previous, this, next
+			for (long offset = 0; offset + 3 < block.getSize(); offset += bytes.length) {
+				monitor.checkCancelled();
+				int length = (int) Math.min(bytes.length, block.getSize() - offset);
+				try {
+					memory.getBytes(start.add(offset), bytes, 0, length);
+				}
+				catch (MemoryAccessException | AddressOutOfBoundsException e) {
+					break;
+				}
+				for (int i = 0; i + 3 < length; i += 4) {
+					long word = (bytes[i] & 0xffL) << 24 | (bytes[i + 1] & 0xffL) << 16 |
+						(bytes[i + 2] & 0xffL) << 8 | bytes[i + 3] & 0xffL;
+					words[0] = words[1];
+					words[1] = words[2];
+					words[2] = word;
+					// the word two back is now between its neighbours
+					if (offset + i < 8) {
+						continue;
+					}
+					long value = words[1];
+					if ((value & 1) != 0 || value == 0 ||
+						!executable.contains(space.getAddress(value))) {
+						continue;
+					}
+					Address target = space.getAddress(value);
+					if (functions.getFunctionContaining(target) != null ||
+						scheduled.contains(target) || !isFree(listing, target)) {
+						continue;
+					}
+					if (entry(functions, space, words[0]) || entry(functions, space, words[2])) {
+						candidates.add(target);
+					}
+				}
+			}
+		}
+		if (candidates.isEmpty()) {
+			return 0;
+		}
+		Map<String, Integer> uses = mnemonicUses(program, monitor);
+		PseudoDisassembler disassembler = new PseudoDisassembler(program);
+		AutoAnalysisManager manager = AutoAnalysisManager.getAnalysisManager(program);
+		int found = 0;
+		for (Address entry : candidates) {
+			monitor.checkCancelled();
+			AddressRange gap = freeRange(listing, entry, executable);
+			if (gap == null || followSubroutine(listing, disassembler, uses, entry, gap,
+				Set.of(), 1) == null) {
+				continue;
+			}
+			manager.disassemble(entry);
+			manager.createFunction(entry, false);
+			program.getBookmarkManager()
+					.setBookmark(entry, BookmarkType.ANALYSIS, BOOKMARK_CATEGORY,
+						"Function that a table of handlers points to");
+			found++;
+		}
+		if (found > 0) {
+			Msg.info(E200Analyzer.class, "Found " + found + " functions that tables point to");
+		}
+		return found;
+	}
+
+	/** Whether a word is the entry point of a function */
+	private static boolean entry(FunctionManager functions, AddressSpace space, long word) {
+		return word != 0 && (word & 1) == 0 && word <= space.getMaxAddress().getOffset() &&
+			functions.getFunctionAt(space.getAddress(word)) != null;
 	}
 
 	/** Whether the listing has no instruction that overlaps {@code a} differently. */

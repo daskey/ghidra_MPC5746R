@@ -21,6 +21,7 @@ import java.util.Set;
 
 import ghidra.app.util.importer.MessageLog;
 import ghidra.framework.options.Options;
+import ghidra.program.model.address.Address;
 import ghidra.program.model.address.AddressSet;
 import ghidra.program.model.data.VoidDataType;
 import ghidra.program.model.lang.Language;
@@ -94,7 +95,10 @@ final class E200Functions {
 			// the functions are created after this step, and it runs again for them
 			AddressSet entries = new AddressSet();
 			analyzed.forEach(f -> entries.add(f.getEntryPoint()));
-			found = E200CodeGaps.findFunctions(program, entries, monitor) > 0;
+			List<Address> inGaps = E200CodeGaps.findFunctions(program, entries, monitor);
+			found = !inGaps.isEmpty();
+			found |= E200CodeGaps.findPointedFunctions(program, new HashSet<>(inGaps),
+				monitor) > 0;
 		}
 		boolean ok = true;
 		Set<Function> identified = new HashSet<>();
