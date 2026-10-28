@@ -47,7 +47,9 @@ import ghidra.util.task.TaskMonitor;
  * time, casting the pointer to several types, gets at each instance the type whose size
  * fits the gap, and an integer field whose value says which size, at the instances where
  * one fits, is its selector ({@code element size by f10}). The comments of a structure
- * built in an earlier analysis are used as they are.
+ * built in an earlier analysis are used as they are. Stray instructions in the way, of no
+ * function and with nothing flowing to them, are data that was disassembled, and where a
+ * count field gives the length, so are the strings the string analysis made of the values.
  */
 final class E200FieldArrays {
 
@@ -191,8 +193,9 @@ final class E200FieldArrays {
 			this.structure = structure;
 			this.component = component;
 			DataType target = pointer.getDataType();
+			// undefined1, undefined2 and undefined4 have a size, if no type
 			boolean open = target == null || target instanceof VoidDataType ||
-				Undefined.isUndefined(target);
+				target instanceof DefaultDataType || target.getLength() <= 0;
 			element = open ? null : target;
 			String comment = component.getComment() == null ? "" : component.getComment();
 			if (open) {
@@ -437,7 +440,7 @@ final class E200FieldArrays {
 				catch (AddressOverflowException e) {
 					continue;
 				}
-				if (!i.block().contains(end) || !free(listing, i.target(), end, type, (int) n)) {
+				if (!i.block().contains(end) || !free(i.target(), end, type, (int) n)) {
 					continue;
 				}
 				try {
@@ -497,14 +500,17 @@ final class E200FieldArrays {
 		}
 
 		/**
-		 * Whether an array of {@code n} elements of {@code type} may be created in a range:
-		 * nothing is there but undefined bytes, single values and elements of the type
-		 * (which pointers made at the elements), or the array is there already
+		 * Whether an array of {@code n} elements of {@code type} may be created in a range,
+		 * and is not there already: nothing is there but undefined bytes, single values,
+		 * elements of the type (which pointers made at the elements), stray instructions, and,
+		 * where a count field gives the length, strings (cleared with the range, the one the
+		 * range starts in and the ends past it included)
 		 */
-		private static boolean free(Listing listing, Address start, Address end, DataType type,
-				int n) {
+		private boolean free(Address start, Address end, DataType type, int n) {
+			Listing listing = program.getListing();
+			boolean counted = count != null;
 			Data at = listing.getDataContaining(start);
-			if (at != null && !at.getAddress().equals(start)) {
+			if (at != null && !at.getAddress().equals(start) && !(counted && string(at))) {
 				return false;
 			}
 			if (at != null && at.getDataType() instanceof Array a && a.getNumElements() == n &&
@@ -512,10 +518,13 @@ final class E200FieldArrays {
 				return false; // there already
 			}
 			AddressSet range = new AddressSet(start, end);
-			if (listing.getInstructions(range, true).hasNext()) {
+			if (!E200Data.strayCode(program, range)) {
 				return false;
 			}
 			for (Data d : listing.getDefinedData(range, true)) {
+				if (counted && string(d)) {
+					continue;
+				}
 				boolean element = d.getDataType().isEquivalent(type) &&
 					d.getAddress().subtract(start) % type.getLength() == 0;
 				if (d.getMaxAddress().compareTo(end) > 0 ||
@@ -525,18 +534,24 @@ final class E200FieldArrays {
 			}
 			return true;
 		}
+
+		private static boolean string(Data d) {
+			return d.getDataType() instanceof AbstractStringDataType;
+		}
 	}
 
 	/**
 	 * The addresses that bound an array: those that pointers in memory point to, that code
-	 * references, and that hold data or code
+	 * references, and that hold data or code that is not stray
 	 */
 	private static final class Boundaries {
+		private final Program program;
 		private final Listing listing;
 		private final ReferenceManager references;
 		private final TreeSet<Address> pointers;
 
 		Boundaries(Program program) {
+			this.program = program;
 			this.listing = program.getListing();
 			this.references = program.getReferenceManager();
 			this.pointers = new TreeSet<>(E200Data.pointerTargets(program));
@@ -549,9 +564,9 @@ final class E200FieldArrays {
 		 */
 		long[] bounds(Address address, MemoryBlock block) {
 			Address limit = pointers.higher(address);
-			Instruction instruction = listing.getInstructionAfter(address);
-			if (instruction != null && before(instruction.getAddress(), limit)) {
-				limit = instruction.getAddress();
+			Address code = codeAfter(address, limit, block);
+			if (code != null) {
+				limit = code;
 			}
 			Address next = limit;
 			for (Data data = listing.getDefinedDataAfter(address); data != null &&
@@ -579,6 +594,30 @@ final class E200FieldArrays {
 				}
 			}
 			return new long[] { bytesTo(next, address, block), bytesTo(limit, address, block) };
+		}
+
+		/**
+		 * The first instruction after an address that is not stray, before {@code limit} and
+		 * within the longest array; null if there is none
+		 */
+		private Address codeAfter(Address address, Address limit, MemoryBlock block) {
+			Address reach;
+			try {
+				reach = address.addNoWrap(MAX_BYTES);
+			}
+			catch (AddressOverflowException e) {
+				reach = block.getEnd();
+			}
+			if (before(reach, limit)) {
+				limit = reach;
+			}
+			for (Instruction i = listing.getInstructionAfter(address); i != null &&
+				before(i.getAddress(), limit); i = listing.getInstructionAfter(i.getAddress())) {
+				if (!E200Data.stray(program, i)) {
+					return i.getAddress();
+				}
+			}
+			return null;
 		}
 
 		private static boolean before(Address a, Address b) {

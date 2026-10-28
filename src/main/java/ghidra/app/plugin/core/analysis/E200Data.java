@@ -176,17 +176,24 @@ final class E200Data {
 	 * Whether the code in a range, if any, is stray: instructions of no function that
 	 * nothing flows to, as of data that was disassembled, which data may replace
 	 */
-	private static boolean strayCode(Program program, AddressSetView range) {
-		Listing listing = program.getListing();
-		ReferenceManager references = program.getReferenceManager();
-		for (Instruction instruction : listing.getInstructions(range, true)) {
-			if (listing.getFunctionContaining(instruction.getAddress()) != null) {
+	static boolean strayCode(Program program, AddressSetView range) {
+		for (Instruction instruction : program.getListing().getInstructions(range, true)) {
+			if (!stray(program, instruction)) {
 				return false;
 			}
-			for (Reference ref : references.getReferencesTo(instruction.getAddress())) {
-				if (ref.getReferenceType().isFlow()) {
-					return false;
-				}
+		}
+		return true;
+	}
+
+	/** Whether an instruction is stray: of no function, and nothing flows to it */
+	static boolean stray(Program program, Instruction instruction) {
+		Address address = instruction.getAddress();
+		if (program.getListing().getFunctionContaining(address) != null) {
+			return false;
+		}
+		for (Reference ref : program.getReferenceManager().getReferencesTo(address)) {
+			if (ref.getReferenceType().isFlow()) {
+				return false;
 			}
 		}
 		return true;

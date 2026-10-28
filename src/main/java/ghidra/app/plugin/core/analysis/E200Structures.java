@@ -453,11 +453,20 @@ final class E200Structures {
 					type = new PointerDataType(elementType, 4, manager);
 				}
 				else if (f.target.fields.size() == 1 || f.target.buffer()) {
-					// a single value, or bytes from offset 0 on
+					// a single value, or bytes from offset 0 on; or a structure of the
+					// analyzer's that code casts the pointer to, whose first field the value is
 					Field first = f.target.fields.firstEntry().getValue();
 					DataType targetType = fieldType(first, first.size(), signedChar);
-					type = targetType == null ? null
-							: new PointerDataType(targetType, 4, manager);
+					DataType cast = f.casts.isEmpty() ? null : castType(f.casts);
+					if (cast instanceof Pointer p && E200Types.ownStructure(p.getDataType()) &&
+						firstField((Structure) p.getDataType(), f.target.fields.firstKey(),
+							first.size())) {
+						type = cast;
+					}
+					else {
+						type = targetType == null ? null
+								: new PointerDataType(targetType, 4, manager);
+					}
 				}
 			}
 			if (type == null && size == 4 && !f.casts.isEmpty()) {
@@ -507,6 +516,19 @@ final class E200Structures {
 				comments.get(e.getKey()));
 		}
 		return structure;
+	}
+
+	/**
+	 * Whether a value of {@code size} at {@code offset} is the field of a structure there, or
+	 * lies in bytes of it that are undefined or a byte of a field
+	 */
+	private static boolean firstField(Structure s, long offset, int size) {
+		if (offset < 0 || offset + size > s.getLength()) {
+			return false;
+		}
+		DataTypeComponent c = s.getComponentContaining((int) offset);
+		return c == null || c.getDataType() instanceof DefaultDataType ||
+			c.getOffset() == offset && (c.getLength() == size || size == 1);
 	}
 
 	/** {@code cast to /float, /ushort}: the distinct types the casts point to, by path */
@@ -628,7 +650,9 @@ final class E200Structures {
 	/**
 	 * Whether {@code type} says more about a field than its {@code current} type: the field was
 	 * undefined or an integer and is a pointer or a float now, or was undefined and has a type
-	 * now, or pointed to undefined and points to something now
+	 * now, or pointed to undefined and points to something now, or pointed to a single value
+	 * and points to a structure of the analyzer's whose first field that value is now (an
+	 * early round sees the value read, a later one the pointer cast to the structure)
 	 */
 	private static boolean refinable(DataType current, DataType type) {
 		if (!E200Types.informative(type) || type.isEquivalent(current)) {
@@ -640,8 +664,12 @@ final class E200Structures {
 		if (current instanceof AbstractIntegerDataType) {
 			return type instanceof Pointer || type instanceof AbstractFloatDataType;
 		}
-		if (current instanceof Pointer p && type instanceof Pointer) {
-			return !E200Types.informative(p);
+		if (current instanceof Pointer p && type instanceof Pointer q) {
+			if (!E200Types.informative(p)) {
+				return true;
+			}
+			return E200Types.ownStructure(q.getDataType()) && replaceable(current) &&
+				firstField((Structure) q.getDataType(), 0, p.getDataType().getLength());
 		}
 		return false;
 	}
