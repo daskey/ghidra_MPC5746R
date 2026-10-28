@@ -102,6 +102,13 @@ final class E200TypeFlow {
 		 * to the data there
 		 */
 		final List<Map.Entry<Slot, Address>> pointees = new ArrayList<>();
+		/**
+		 * The width of the value the function returns, 1 or 2 if every return gives a value
+		 * extended from that many bytes, with the signedness the extensions show, else null
+		 */
+		int[] returned;
+		/** The function */
+		Address entry;
 		/** The function, if the decompiler sees no value returned by it */
 		Address returnsNothing;
 		/** The function, if its return type is not known yet (not set by Parameter ID) */
@@ -140,6 +147,7 @@ final class E200TypeFlow {
 		Function function = high.getFunction();
 		FunctionManager functions = function.getProgram().getFunctionManager();
 		Address entry = function.getEntryPoint();
+		facts.entry = entry;
 		DataType returned = high.getFunctionPrototype().getReturnType();
 		if (returned == null || returned instanceof VoidDataType) {
 			facts.returnsNothing = entry;
@@ -175,6 +183,7 @@ final class E200TypeFlow {
 				facts.signs.merge(global, E200Integers.evidence(variable), Integer::sum);
 			}
 		}
+		int returns = 0;
 		Iterator<PcodeOpAST> ops = high.getPcodeOps();
 		while (ops.hasNext()) {
 			PcodeOpAST op = ops.next();
@@ -210,6 +219,10 @@ final class E200TypeFlow {
 				case PcodeOp.RETURN -> {
 					if (op.getNumInputs() > 1) {
 						flow(facts, functions, entry, op.getInput(1), new Return(entry));
+						int[] narrow = E200Integers.extended(op.getInput(1), 0);
+						facts.returned = facts.returned == null ? narrow
+								: narrow == null ? null : widest(facts.returned, narrow);
+						returns++;
 					}
 				}
 				case PcodeOp.COPY -> {
@@ -222,6 +235,10 @@ final class E200TypeFlow {
 					// no value moves between places
 				}
 			}
+		}
+		if (returns == 0 || facts.returned != null &&
+			(facts.returned[0] == 0 || facts.returned[0] > 2)) {
+			facts.returned = null;
 		}
 		E200Structures.collect(high, facts);
 		return facts;
@@ -576,6 +593,16 @@ final class E200TypeFlow {
 		Map<Slot, int[]> widths = new HashMap<>();
 		for (Facts f : facts) {
 			f.widths.forEach((s, w) -> widths.merge(s, w, E200TypeFlow::widest));
+		}
+		// a function that returns a value extended from a byte or halfword on every path
+		// returns one, whatever its callers do with the register; their uses add signedness
+		for (Facts f : facts) {
+			if (f.returned != null && f.entry != null) {
+				Slot r = new Return(f.entry);
+				int[] callers = widths.get(r);
+				widths.put(r, new int[] { f.returned[0],
+					f.returned[1] + (callers == null ? 0 : callers[1]) });
+			}
 		}
 		Set<Slot> narrowed = new HashSet<>();
 		for (Map.Entry<Slot, int[]> e : widths.entrySet()) {
