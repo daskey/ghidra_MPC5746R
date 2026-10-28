@@ -217,8 +217,12 @@ functions, runs the parts below in rounds and logs what they did:
   constant that is no address (an error code passed where other callers pass a pointer)
   gets no structure, and no pointer type. A pointer field whose target is such a run of
   bytes is a `byte *`, and one that code only passes to a function that knows what it points
-  to gets that type. A structure built in an early round, from the functions decompiled
-  then, gets the field types that later rounds show. The places that are passed the address of the same
+  to gets that type. A pointer that code indexes and reads at the element and the next one,
+  as `p[i]` and `p[i + 1]`, points to elements of that type, not to a structure of two
+  fields. A structure built in an early round, from the functions decompiled
+  then, gets the field types that later rounds show (a pointer to a single value becomes a
+  pointer to a structure of the analyzer's whose first field that value is, once a later
+  round sees the pointer cast to the structure). The places that are passed the address of the same
   global, as the parameters of the functions that initialize, run and read one module's
   instance, point to data of one layout: their groups are one group, with one structure,
   where their shapes fit together (fields that overlap are the same field, or bytes of it).
@@ -232,12 +236,34 @@ functions, runs the parts below in rounds and logs what they did:
   fields and the function writes it as a whole. Data that code passes as a pointer to such a
   structure, as a map descriptor in flash passed to a lookup function, gets the structure
   where only single values at its fields are there (an integer over whole integer fields, or
-  a byte of one, counts), and the data its pointer fields point to gets the pointed-to type
+  a byte of one, counts; so do the pointers to nothing in particular that the reference
+  analysis guesses at values that are addresses, and stray instructions nothing flows to;
+  an address in flash that code passes as a pointer starts another object, and the structure
+  does not go over it), and the data its pointer fields point to gets the pointed-to type
   (a byte for a `void *`; all of flash is executable in an image, and the reference analysis
   would disassemble an undefined target): `lookup(&P_50800274_092923ec, x)` instead of
-  `lookup((P_50800274 *)&USHORT_092923ec, x)`. A constant that is an address in RAM or flash,
+  `lookup((P_50800274 *)&USHORT_092923ec, x)`, also where it is one of several the code
+  chooses between (`flag ? &a : &b`) and where a table of pointers to such data points to it.
+  A constant that is an address in RAM or flash,
   passed where a pointer to a type is expected, gets data of that type there, so that the
   decompiler shows `&USHORT_4000d178` instead of `(ushort *)0x4000d178`.
+- **Arrays that pointer fields point to** (`E200FieldArrays.java`): a descriptor in flash,
+  as of a calibration map, holds the lengths of the arrays it points to
+  (`{short nx; short ny; float *x; float *y; void *values; byte type}`), and the lookup
+  function indexes them with bounds it reads from the descriptor, so no array has a length
+  in the code. The instances of the structure show the arrays: the data at the target of a
+  pointer field reaches the next address that a pointer in memory points to, that code
+  references or that holds data or code. An integer field whose value is the number of
+  elements in that gap at most instances, or the product of two, is the count field of the
+  pointer field, and gives the length where the gap holds padding; the field's comment
+  records it (`f0 * f2 elements`). A pointer field whose element type the code chooses at
+  run time (`void *`, cast to `float *`, `ushort *` and `byte *` after indexing) gets at
+  each instance the type whose size fits, and an integer field whose value says which size
+  is its selector (`element size by f10`). The axes and values of the calibration maps and
+  curves then decompile as `float[18]`, `float[20]` and `byte[360]` at their descriptors.
+  Stray instructions in the way, of no function and with nothing flowing to them, are
+  calibration data that was disassembled and are replaced, as are, where a count field gives
+  the length, the strings the string analysis made of the values.
 - **Pointers to functions** (`E200FunctionPointers.java`): a pointer in flash, an element of
   an array of pointers or a pointer field of a structure whose values are all entry points of
   functions (or null) gets a pointer to a function definition: the functions' signature where

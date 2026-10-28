@@ -141,11 +141,38 @@ final class E200Structures {
 		}
 
 		/**
+		 * Whether the pointer points to the elements of an array: it is indexed with a
+		 * stride, and its fields are the element and the next one, of the stride's size, as
+		 * code reads {@code p[i]} and {@code p[i + 1]}. Fields further on are those of a
+		 * structure with arrays in it, as {@code p->a[i]} and {@code p->b[i]}.
+		 */
+		boolean elements() {
+			if (mixed || stride == 0 || fields.isEmpty()) {
+				return false;
+			}
+			for (Map.Entry<Long, Field> e : fields.entrySet()) {
+				if (e.getKey() != 0 && e.getKey() != stride || e.getValue().size() != stride) {
+					return false;
+				}
+			}
+			return true;
+		}
+
+		/** The accesses of all the fields, as those of one element */
+		Field element() {
+			Field element = new Field();
+			for (Field f : fields.values()) {
+				element.merge(f);
+			}
+			return element;
+		}
+
+		/**
 		 * Whether the pointer points to a structure: fields other than one at offset 0, and
 		 * not only bytes from offset 0 on, as code accesses a buffer, and one stride
 		 */
 		boolean structure() {
-			if (mixed) {
+			if (mixed || elements()) {
 				return false;
 			}
 			if (fields.size() == 1) {
@@ -173,6 +200,11 @@ final class E200Structures {
 		final Shape target = new Shape();
 		/** The pointer types that code casts the field's value to, as {@code (float *)p->f4} */
 		final List<DataType> casts = new ArrayList<>();
+		/**
+		 * The pointer types that code casts the field's value to after indexing it, as
+		 * {@code *(ushort *)((int)p->f8 + i * 2)}: the element types the code chooses between
+		 */
+		final List<DataType> elementCasts = new ArrayList<>();
 		/** The entry points of functions stored in the field */
 		final Set<Address> targets = new TreeSet<>();
 		/** The calls through the field's value */
@@ -187,6 +219,7 @@ final class E200Structures {
 			accesses.addAll(other.accesses);
 			target.merge(other.target);
 			casts.addAll(other.casts);
+			elementCasts.addAll(other.elementCasts);
 			targets.addAll(other.targets);
 			calls.addAll(other.calls);
 		}
@@ -296,6 +329,7 @@ final class E200Structures {
 							if (cast != null) {
 								f.casts.add(cast);
 							}
+							f.elementCasts.addAll(E200Code.castsAfterArithmetic(out));
 							calls(out, f.calls, 0);
 							if (depth < MAX_DEPTH) {
 								walk(functions, out, 0, f.target, new HashSet<>(), depth + 1);
@@ -373,6 +407,7 @@ final class E200Structures {
 			new StructureDataType(E200Types.CATEGORY, name, 0, manager);
 		long end = 0;
 		Map<Long, DataType> types = new TreeMap<>();
+		Map<Long, String> comments = new HashMap<>();
 		for (Map.Entry<Long, Field> e : shape.fields.entrySet()) {
 			long offset = e.getKey();
 			Field f = e.getValue();
@@ -411,12 +446,27 @@ final class E200Structures {
 						new TreeMap<>());
 					type = target == null ? null : new PointerDataType(target, 4, manager);
 				}
+				else if (f.target.elements()) {
+					// the elements of an array, read as p[i] and p[i + 1]
+					DataType elementType =
+						fieldType(f.target.element(), (int) f.target.stride, signedChar);
+					type = new PointerDataType(elementType, 4, manager);
+				}
 				else if (f.target.fields.size() == 1 || f.target.buffer()) {
-					// a single value, or bytes from offset 0 on
+					// a single value, or bytes from offset 0 on; or a structure of the
+					// analyzer's that code casts the pointer to, whose first field the value is
 					Field first = f.target.fields.firstEntry().getValue();
 					DataType targetType = fieldType(first, first.size(), signedChar);
-					type = targetType == null ? null
-							: new PointerDataType(targetType, 4, manager);
+					DataType cast = f.casts.isEmpty() ? null : castType(f.casts);
+					if (cast instanceof Pointer p && E200Types.ownStructure(p.getDataType()) &&
+						firstField((Structure) p.getDataType(), f.target.fields.firstKey(),
+							first.size())) {
+						type = cast;
+					}
+					else {
+						type = targetType == null ? null
+								: new PointerDataType(targetType, 4, manager);
+					}
 				}
 			}
 			if (type == null && size == 4 && !f.casts.isEmpty()) {
@@ -424,6 +474,22 @@ final class E200Structures {
 			}
 			if (type == null) {
 				type = fieldType(f, size, signedChar);
+			}
+			if (size == 4 && !f.elementCasts.isEmpty() &&
+				(Undefined.isUndefined(type) || E200Types.integer(type))) {
+				// the value is indexed and cast to pointer types, as (float *)(p->fc + i * 4):
+				// a pointer, to what the casts say or what the code chooses at run time
+				DataType cast = castType(f.elementCasts);
+				type = cast != null ? cast
+						: new PointerDataType(VoidDataType.dataType, 4, manager);
+			}
+			if (type instanceof Pointer p && !E200Types.informative(p) &&
+				(!f.casts.isEmpty() || !f.elementCasts.isEmpty())) {
+				// the code chooses what it points to at run time: the types it casts it to,
+				// for the arrays at the instances (see E200FieldArrays)
+				List<DataType> casts = new ArrayList<>(f.casts);
+				casts.addAll(f.elementCasts);
+				comments.put(offset, castsComment(casts));
 			}
 			types.put(offset, type);
 			end = offset + size;
@@ -446,9 +512,35 @@ final class E200Structures {
 		structure.growStructure((int) length);
 		for (Map.Entry<Long, DataType> e : types.entrySet()) {
 			structure.replaceAtOffset(e.getKey().intValue(), e.getValue(),
-				e.getValue().getLength(), "f" + Long.toHexString(e.getKey()), null);
+				e.getValue().getLength(), "f" + Long.toHexString(e.getKey()),
+				comments.get(e.getKey()));
 		}
 		return structure;
+	}
+
+	/**
+	 * Whether a value of {@code size} at {@code offset} is the field of a structure there, or
+	 * lies in bytes of it that are undefined or a byte of a field
+	 */
+	private static boolean firstField(Structure s, long offset, int size) {
+		if (offset < 0 || offset + size > s.getLength()) {
+			return false;
+		}
+		DataTypeComponent c = s.getComponentContaining((int) offset);
+		return c == null || c.getDataType() instanceof DefaultDataType ||
+			c.getOffset() == offset && (c.getLength() == size || size == 1);
+	}
+
+	/** {@code cast to /float, /ushort}: the distinct types the casts point to, by path */
+	private static String castsComment(List<DataType> casts) {
+		Set<String> names = new TreeSet<>();
+		for (DataType t : casts) {
+			if (t instanceof Pointer p && p.getDataType() != null &&
+				p.getDataType().getLength() > 0) {
+				names.add(p.getDataType().getPathName());
+			}
+		}
+		return names.isEmpty() ? null : "cast to " + String.join(", ", names);
 	}
 
 	/**
@@ -476,15 +568,27 @@ final class E200Structures {
 		return structure != null ? structure : other;
 	}
 
-	/** The type of a field: the one its accesses of {@code size} agree on, else undefined */
+	/**
+	 * The type of a field: the one its accesses of {@code size} agree on, else undefined. A
+	 * pointer type counts only when every access has it, as when the loaded value is passed
+	 * to a function whose parameter says what it points to.
+	 */
 	private static DataType fieldType(Field f, int size, boolean signedChar) {
 		List<DataType> types = new ArrayList<>();
+		boolean pointers = true;
 		for (Access a : f.accesses) {
 			DataType t = a.type();
 			if (a.size() == size && t != null && E200Types.informative(t) &&
-				t.getLength() == size && !(t instanceof Pointer)) {
+				t.getLength() == size) {
 				types.add(t);
+				pointers &= t instanceof Pointer;
 			}
+			else {
+				pointers = false;
+			}
+		}
+		if (!pointers) {
+			types.removeIf(t -> t instanceof Pointer);
 		}
 		DataType type = types.isEmpty() ? null : E200Types.chooseType(types, signedChar, true);
 		return type != null && type.getLength() == size ? type
@@ -535,7 +639,9 @@ final class E200Structures {
 				!refinable(current.getDataType(), type)) {
 				continue;
 			}
-			existing.replaceAtOffset(offset, type, length, c.getFieldName(), null);
+			String comment = c.getComment() != null ? c.getComment()
+					: current == null ? null : current.getComment();
+			existing.replaceAtOffset(offset, type, length, c.getFieldName(), comment);
 			changed++;
 		}
 		return changed;
@@ -544,7 +650,9 @@ final class E200Structures {
 	/**
 	 * Whether {@code type} says more about a field than its {@code current} type: the field was
 	 * undefined or an integer and is a pointer or a float now, or was undefined and has a type
-	 * now, or pointed to undefined and points to something now
+	 * now, or pointed to undefined and points to something now, or pointed to a single value
+	 * and points to a structure of the analyzer's whose first field that value is now (an
+	 * early round sees the value read, a later one the pointer cast to the structure)
 	 */
 	private static boolean refinable(DataType current, DataType type) {
 		if (!E200Types.informative(type) || type.isEquivalent(current)) {
@@ -556,8 +664,12 @@ final class E200Structures {
 		if (current instanceof AbstractIntegerDataType) {
 			return type instanceof Pointer || type instanceof AbstractFloatDataType;
 		}
-		if (current instanceof Pointer p && type instanceof Pointer) {
-			return !E200Types.informative(p);
+		if (current instanceof Pointer p && type instanceof Pointer q) {
+			if (!E200Types.informative(p)) {
+				return true;
+			}
+			return E200Types.ownStructure(q.getDataType()) && replaceable(current) &&
+				firstField((Structure) q.getDataType(), 0, p.getDataType().getLength());
 		}
 		return false;
 	}
