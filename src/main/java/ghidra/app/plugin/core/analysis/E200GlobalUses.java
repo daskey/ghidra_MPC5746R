@@ -343,17 +343,25 @@ final class E200GlobalUses {
 				undefined.computeIfAbsent(use.address(), a -> new ArrayList<>()).add(use);
 				return;
 			}
-			if (!Undefined.isUndefined(data.getDataType())) {
+			// an array of undefined elements that code indexes is typed by the uses of its
+			// first element, as one value of the element's size
+			DataType type = data.getDataType();
+			int length = data.getLength();
+			if (type instanceof Array a && Undefined.isUndefined(a.getDataType())) {
+				type = a.getDataType();
+				length = a.getElementLength();
+			}
+			if (!Undefined.isUndefined(type)) {
 				return;
 			}
 			if (use.access() == Access.ADDRESS && use.type() != null &&
-				E200Types.informative(use.type()) && use.type().getLength() != data.getLength()) {
+				E200Types.informative(use.type()) && use.type().getLength() != length) {
 				mismatched.computeIfAbsent(use.address(), a -> new ArrayList<>()).add(use);
 			}
-			else if (use.access() != Access.ADDRESS && use.size() == data.getLength()) {
+			else if (use.access() != Access.ADDRESS && use.size() == length) {
 				accessedAsIs.add(use.address());
 			}
-			if (use.type() != null && use.type().getLength() == data.getLength()) {
+			if (use.type() != null && use.type().getLength() == length) {
 				if (!Undefined.isUndefined(use.type())) {
 					types.computeIfAbsent(use.address(), a -> new ArrayList<>()).add(use.type());
 				}
@@ -440,16 +448,22 @@ final class E200GlobalUses {
 		}
 
 		/**
-		 * Whether a range holds nothing but undefined bytes and data of undefined type that
-		 * starts and ends within it
+		 * Whether a range holds nothing but undefined bytes, data of undefined type that
+		 * starts and ends within it, and stray instructions (data that was disassembled)
 		 */
 		private boolean onlyUndefined(Address start, Address end) {
 			if (listing.isUndefined(start, end)) {
 				return true;
 			}
 			AddressSet range = new AddressSet(start, end);
-			if (listing.getInstructions(range, true).hasNext()) {
+			if (!E200Data.strayCode(program, range)) {
 				return false;
+			}
+			Instruction across = listing.getInstructionContaining(start);
+			if (across != null && !across.getAddress().equals(start) ||
+				(across = listing.getInstructionContaining(end)) != null &&
+					across.getMaxAddress().compareTo(end) > 0) {
+				return false; // an instruction that reaches out of the range
 			}
 			Data first = listing.getDataContaining(start);
 			if (first != null && !first.getAddress().equals(start)) {
@@ -477,8 +491,22 @@ final class E200GlobalUses {
 				monitor.checkCancelled();
 				DataType type = E200Types.chooseType(e.getValue(), signedChar, true);
 				Data data = listing.getDefinedDataAt(e.getKey());
-				if (type != null && data != null && Undefined.isUndefined(data.getDataType()) &&
-					E200Data.replace(listing, e.getKey(), type)) {
+				if (type == null || data == null) {
+					continue;
+				}
+				DataType replacement = null;
+				if (Undefined.isUndefined(data.getDataType())) {
+					replacement = type;
+				}
+				else if (data.getDataType() instanceof Array a &&
+					Undefined.isUndefined(a.getDataType()) &&
+					a.getElementLength() == type.getLength()) {
+					// an array of undefined elements that code indexes: the type of its first
+					// element, which code reads as a value too
+					replacement = new ArrayDataType(type, a.getNumElements(), type.getLength(),
+						program.getDataTypeManager());
+				}
+				if (replacement != null && E200Data.replace(listing, e.getKey(), replacement)) {
 					changed.add(e.getKey());
 					typed++;
 				}

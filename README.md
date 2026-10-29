@@ -144,9 +144,23 @@ each with an option:
   start pattern. A gap after a return or unconditional branch becomes functions when all of
   it decodes as complete subroutines that stay in the gap, use no `se_illegal` and none of
   the instructions typical of data decoded as code that the program does not otherwise use.
-  An empty handler, a single `se_blr` between two functions, is too short for that rule;
-  it becomes a function when a word of flash next to a pointer to a function points to it,
-  as the entries of a table of handlers do. Each such function gets an analysis bookmark.
+  An empty handler, a single `se_blr` between two functions, is too short for that rule; it
+  becomes a function when a word of flash in a column of pointers to functions points to it,
+  as the entries of a table of handlers do: the words one stride before and after it (4 to
+  32 bytes, as a field of a table of structures is) point to functions, or a word up to two
+  strides before it and one up to two strides after it do and none of the four points
+  elsewhere, or the word ends a column of two with no address beyond it (where the words
+  between the two are not all pointers to code, as a dense array of pointers would be at any
+  stride; the other fields of a structure, other handlers among them, leave gaps); words
+  pointing to the same code count as entries next to a real one, as an array of one default
+  handler before the others; at an end of an array of pointers, one neighbour pointing to a
+  function is enough for code of more than one instruction, or for one instruction right
+  after the return or branch that ends a function, where compiled code places the next
+  function. A pointer target within 8 bytes of the code, or inside it, that is no function
+  says the bytes are data: the values of a table that a table of structures points to one by
+  one (`04 04 00 04`) decode as code too; so does code that writes a register compiled code
+  keeps (r2, r13, r14-r31) without a stack frame to save it in. Each such function gets an
+  analysis bookmark.
 - **Calling conventions for kept registers** (`E200KeptRegisters.java`): e200 compilers
   know which volatile registers (r0, r3-r12) the functions they compile change, and keep
   values in the others across calls, which the decompiler showed as `extraout_` variables.
@@ -182,18 +196,32 @@ functions, runs the parts below in rounds and logs what they did:
   accesses with the same stride whose addresses lie within one stride make a table: an
   array of the field's type if one field fills the stride, otherwise an array of a structure
   `S_<address>` with fields `f<offset>` (also those code accesses directly in the first
-  element), labeled `tbl_<address>`. A field indexed again, as in a two-dimensional array,
+  element), labeled `tbl_<address>`. An element starts at the lowest access, aligned down
+  to its widest fields where those lie aligned in memory, as compilers align a structure:
+  code that never reads the first bytes of an element (`tbl[i].f2` with a pointer at
+  `tbl[i].f4`) would otherwise shift the table and its last element over the next variable.
+  A field indexed again, as in a two-dimensional array,
   is an array itself; a pointer field points to what the code reads through it
-  (`*tbl[i].f4` as a byte: `byte *`, and the calibration bytes the records point to get
-  the type). The decompiler then shows `tbl_<address>[i].f4` instead of
+  (`*tbl[i].f4` as a byte, or a value code casts or copies to a byte, as `(char)*p` and
+  `BYTE_<address> = *p`: `byte *`, and the calibration bytes the records point to get the
+  type). Code that chooses between tables, `(flag ? &a : &b)[i]`, indexes each of them. The
+  decompiler then shows `tbl_<address>[i].f4` instead of
   `(&BYTE_<address>)[i * 8]`. The length comes from comparisons of the index with a constant
-  (`i < 8`, not `i != 0xff`) and masks (`i & 7`); without one, a table reaches the next
+  (`i < 8`, not `i != 0xff`), or with a count that code reads from flash
+  (`i < Xxx_Count`), and masks (`i & 7`); without one, a table reaches the next
   element that code accesses or that a pointer in memory points to, within 512 bytes (an
-  array of structures keeps one element if there is none). A table never takes in an access
-  or data that does not fit its elements, code, or another table. Where code indexes one
+  array of structures keeps one element if there is none), unless only the functions that
+  index the table access the element and they read or write it as what the table holds
+  there, as they read an element on its own too (`a[i]` and `a[6]`; an address that code
+  only passes starts another object, and so does the integer count after an array of
+  pointers). A table never takes in an access or data that does not fit its elements, code,
+  or another table; stray instructions are data that was disassembled. Where code indexes one
   address with several strides, as in `a[i]` and `a[2 * i]`, an array of the smallest
   stride whose elements all the accesses are wins over a structure of the larger one.
-  Fields are typed from their uses like globals, in every round. A pointer field gets the
+  Fields are typed from their uses like globals, in every round; a field whose accesses
+  give no type keeps the type of the data at the first element, as the uses of the global
+  typed it, and an array of undefined elements gets the type of its first element where
+  code reads that as a value. A pointer field gets the
   type code casts it to, `float *` for `*(float *)tbl[i].f34`, or a pointer to a structure
   the analyzer made for a parameter it is passed as, and the data it points to gets the
   pointed-to type: Ghidra's reference analysis would otherwise take an undefined target for
@@ -219,31 +247,45 @@ functions, runs the parts below in rounds and logs what they did:
   constant that is no address (an error code passed where other callers pass a pointer)
   gets no structure, and no pointer type. A pointer field whose target is such a run of
   bytes is a `byte *`, and one that code only passes to a function that knows what it points
-  to gets that type. A pointer that code indexes and reads at the element and the next one,
-  as `p[i]` and `p[i + 1]`, points to elements of that type, not to a structure of two
-  fields. A structure built in an early round, from the functions decompiled
-  then, gets the field types that later rounds show (a pointer to a single value becomes a
-  pointer to a structure of the analyzer's whose first field that value is, once a later
-  round sees the pointer cast to the structure). The places that are passed the address of the same
-  global, as the parameters of the functions that initialize, run and read one module's
-  instance, point to data of one layout: their groups are one group, with one structure,
-  where their shapes fit together (fields that overlap are the same field, or bytes of it).
+  to gets that type; so does one that code also reads through, where what it reads are
+  fields of that structure or of the elements of an array of it (`p->f14->f8`, the first
+  field of `p->f14[1]` for a structure of 8 bytes, passed on as `p->f14 + 1`). A pointer
+  that code indexes and reads at the element and the next one, as `p[i]` and `p[i + 1]`,
+  points to elements of that type, not to a structure of two fields. A structure built in an
+  early round, from the functions decompiled then, gets the field types that later rounds
+  show (a pointer to a single value becomes a pointer to a structure of the analyzer's whose
+  first field that value is, once a later round sees the pointer cast to the structure, and
+  a pointer to a structure of untyped words a pointer to the structure that code passes it
+  on as, where the words are fields of that structure or of its elements).
+  The places that are passed the address of the same global, as the parameters of the
+  functions that initialize, run and read one module's instance, point to data of one
+  layout: their groups are one group, with one structure, where their shapes fit together
+  (fields that overlap are the same field, or bytes of it).
   The instances that code passes by address bound the structure's length, since none holds
-  another: a lookup function reads the scale and offset of a map descriptor whether or not
-  the descriptor has them, and the curve descriptors 12 bytes apart give a structure of 12
-  bytes, so that `lookup(&P_<lookup>_<address>, x)` needs no cast at the hundreds of calls
-  and the two fields past the end show in the one function that reads them. Where the data at
-  the instances is in smaller pieces than a field, as the `byte` that code reads where a
-  function writes a `ushort` of the value and its complement, the structure has the pieces as
-  fields and the function writes it as a whole. Data that code passes as a pointer to such a
-  structure, as a map descriptor in flash passed to a lookup function, gets the structure
-  where only single values at its fields are there (an integer over whole integer fields, or
-  a byte of one, counts; so do the pointers to nothing in particular that the reference
-  analysis guesses at values that are addresses, and stray instructions nothing flows to;
-  an address in flash that code passes as a pointer starts another object, and the structure
-  does not go over it), and the data its pointer fields point to gets the pointed-to type
-  (a byte for a `void *`; all of flash is executable in an image, and the reference analysis
-  would disassemble an undefined target): `lookup(&P_<lookup>_<address>, x)` instead of
+  another: the descriptors of float maps are 20 bytes apart, and the fields past 20 bytes
+  are left out, so that `lookup(&P_<lookup>_<address>, x)` needs no cast at the hundreds of
+  calls. Where the code reads the fields past that length, or uses the values it read, only
+  under comparisons of an integer field of the structure with constants, as the lookups use
+  the scale and offset that follow the descriptor of an integer-valued map only in the
+  branches of the integer types (`if (p->f10 == 8) return (float)v * scale + offset`), the
+  fields make a structure of their own, `P_<place>_ext` (fields `f14` and `f18`), named in
+  the structure's description with the rule (`followed by P_<place>_ext where f10 != 0`,
+  or `where f2 = 4, 8, c, 10`), and the instances whose field has such a value are followed
+  by it. A value that the decompiler types after the field of the next element (`p[1].f4`,
+  a `float *`) but that code only uses as a float is a `float`. Where the data at the
+  instances is in smaller pieces than a field, as the `byte` that code reads where a function
+  writes a `ushort` of the value and its complement, the structure has the pieces as fields
+  and the function writes it as a whole; the data from the next address that code passes on
+  its own is another object's, not pieces of the instance before it. Data that code passes as
+  a pointer to such a structure, as a map descriptor in flash passed to a lookup function,
+  gets the structure where only single values at its fields are there (an integer over
+  whole integer fields, or a byte of one, counts; so do the pointers to nothing in
+  particular that the reference analysis guesses at values that are addresses, and stray
+  instructions nothing flows to; an address in flash that code passes as a pointer starts
+  another object, and the structure does not go over it), and the data its pointer fields
+  point to gets the pointed-to type (a byte for a `void *`; all of flash is executable in an
+  image, and the reference analysis would disassemble an undefined target):
+  `lookup(&P_<lookup>_<address>, x)` instead of
   `lookup((P_<lookup> *)&USHORT_<address>, x)`, also where it is one of several the code
   chooses between (`flag ? &a : &b`) and where a table of pointers to such data points to it.
   A constant that is an address in RAM or flash,
@@ -272,12 +314,24 @@ functions, runs the parts below in rounds and logs what they did:
   (`element size by f10: 0=4, 4=1, 8=2`), for the structures whose instances do not pin
   them. The axes and values of the calibration maps and
   curves then decompile as `float[18]`, `float[20]` and `byte[360]` at their descriptors.
-  Stray instructions in the way, of no function and with nothing flowing to them, are
-  calibration data that was disassembled and are replaced, as are, where a count field gives
-  the length, the strings the string analysis made of the values; the words in the array, or
-  in other arrays of values, that happen to be addresses do not bound it, and the arrays of
-  integers that code reading a calibration region word by word made over it are carved
-  around it.
+  Stray instructions in the way, of no function and with nothing flowing to them but the
+  instructions of their own run (data decoded as a branch to itself), are calibration data
+  that was disassembled and are replaced, as are, where a count field gives the length,
+  the strings the string analysis made of the values; a word elsewhere that holds an
+  address in the array (a value that happens to be an address, a table of the flash
+  sectors, a word of code that was not disassembled) does not bound it unless an
+  instruction uses the address, and the arrays of integers that code reading a calibration
+  region word by word made over it are carved around it. A count of 1 makes no array but a
+  value of the element type, and an instance whose field holds 1 does not vote for the field
+  as a count.
+- **Stray code**: all of a flash image is executable, so Ghidra's reference analysis
+  disassembles the calibration data that instructions form the address of, and the tables
+  of handlers point to, where the bytes decode as code. The data placed above replaces such
+  instructions where it covers them; the step ends by clearing the other runs of stray
+  instructions that lie between data, apart from those with a label of the user's or of
+  analysis (an interrupt vector), and the "Found Code" bookmarks where data replaced code.
+  Runs next to code stay: the targets of computed branches, as an unrolled compare loop
+  entered in the middle, and the functions whose address code takes.
 - **Pointers to functions** (`E200FunctionPointers.java`): a pointer in flash, an element of
   an array of pointers or a pointer field of a structure whose values are all entry points of
   functions (or null) gets a pointer to a function definition: the functions' signature where
@@ -355,17 +409,17 @@ decompiled, per image:
 
 | | Mean | Range |
 |---|---|---|
-| Functions | 14,487 | 13,953-14,977 |
-| Instructions | 444,107 | 418,471-462,873 |
+| Functions | 14,503 | 13,969-14,993 |
+| Instructions | 444,016 | 418,381-462,769 |
 | Decompiler failures | 0 | 0 |
-| Functions with decompiler warnings | 92 | 89-95 |
+| Functions with decompiler warnings | 93 | 90-96 |
 | Functions with `undefined` in their signature | 31 | 31 |
 | Functions with `extraout_` variables | 31 | 30-31 |
-| `undefinedN` in the C | 1,329 | 1,323-1,334 |
-| `DAT_` references in the C | 451 | 442-461 |
-| Pointer casts in the C | 4,379 | 4,178-4,515 |
-| Calls through `(code *)` casts | 29 | 29 |
-| Analysis time (2 CPUs) | 283 s | 253 s-302 s |
+| `undefinedN` in the C | 1,320 | 1,314-1,325 |
+| `DAT_` references in the C | 447 | 438-457 |
+| Pointer casts in the C | 4,315 | 4,115-4,451 |
+| Calls through `(code *)` casts | 31 | 31 |
+| Analysis time (2 CPUs) | 299 s | 274 s-319 s |
 
 Most decompiler warnings are about infinite loops (halt loops) and unreachable blocks the
 decompiler removes; the `extraout_` and `undefined` signatures are in hand-written

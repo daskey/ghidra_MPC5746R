@@ -16,6 +16,8 @@
 package ghidra.app.plugin.core.analysis;
 
 import java.util.*;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 import ghidra.program.model.address.*;
 import ghidra.program.model.data.*;
@@ -23,7 +25,9 @@ import ghidra.program.model.listing.*;
 import ghidra.program.model.mem.*;
 import ghidra.program.model.symbol.*;
 import ghidra.program.model.util.CodeUnitInsertionException;
+import ghidra.util.exception.CancelledException;
 import ghidra.util.exception.InvalidInputException;
+import ghidra.util.task.TaskMonitor;
 
 /**
  * Operations on the data of the listing (shared by the steps of {@link E200Analyzer}):
@@ -79,15 +83,86 @@ final class E200Data {
 		}
 	}
 
+	private static final Pattern EXTENSION = Pattern.compile(
+		"followed by (\\S+) where f([0-9a-f]+) (=|!=) ([0-9a-f]+(?:, [0-9a-f]+)*)");
+
+	/**
+	 * The description of a structure whose instances are followed by the structure
+	 * {@code extension} where {@code rule} holds (see {@link E200Structures#extension})
+	 */
+	static String extensionRule(String extension, String rule) {
+		return "followed by " + extension + " where " + rule;
+	}
+
+	/**
+	 * The structure that follows the instance of a structure at an address, or null: the
+	 * structure's description names it and the values of a field that the instances it
+	 * follows have ({@code followed by P_x_ext where f10 != 0}), and the bytes at the address
+	 * hold such a value.
+	 */
+	static Structure extension(Program program, Address address, Structure s) {
+		String description = s.getDescription();
+		Matcher m = description == null ? null : EXTENSION.matcher(description);
+		if (m == null || !m.find()) {
+			return null;
+		}
+		DataType t = program.getDataTypeManager().getDataType(E200Types.CATEGORY, m.group(1));
+		int offset = Integer.parseInt(m.group(2), 16);
+		DataTypeComponent c = s.getComponentAt(offset);
+		Memory memory = program.getMemory();
+		MemoryBlock block = memory.getBlock(address);
+		if (!(t instanceof Structure extension) || c == null || c.getOffset() != offset ||
+			block == null || !block.isInitialized()) {
+			return null;
+		}
+		long value;
+		try {
+			Address at = address.addNoWrap(offset);
+			value = switch (c.getLength()) {
+				case 1 -> memory.getByte(at) & 0xffL;
+				case 2 -> memory.getShort(at) & 0xffffL;
+				case 4 -> memory.getInt(at) & 0xffffffffL;
+				default -> -1;
+			};
+		}
+		catch (AddressOverflowException | MemoryAccessException e) {
+			return null;
+		}
+		boolean listed = false;
+		for (String v : m.group(4).split(", ")) {
+			listed |= Long.parseLong(v, 16) == value;
+		}
+		return value >= 0 && m.group(3).equals("=") == listed ? extension : null;
+	}
+
 	/**
 	 * Gives the data at an address that code passes as a pointer to a structure that
 	 * structure, where there are only single values there, at fields of their size, pointers
 	 * to nothing in particular that the reference analysis guessed, or structures of the
 	 * analyzer's that lie inside it (the larger structure wins, whichever is applied first);
-	 * returns whether it did. The data its pointer fields point to gets the
-	 * pointed-to type (see {@link #targets}).
+	 * returns whether it did. The data its pointer fields point to gets the pointed-to type
+	 * (see {@link #targets}). Where the structure's instances with the bytes there are
+	 * followed by fields of their own (see {@link #extension}), as the scale and offset of an
+	 * integer-valued map, those get their structure too, on the same conditions, unless code
+	 * passes their address, which starts another object.
 	 */
 	static boolean structureAt(Program program, Address address, Structure s) {
+		boolean placed = place(program, address, s);
+		Data data = program.getListing().getDefinedDataAt(address);
+		Structure extension = data != null &&
+			data.getDataType().getPathName().equals(s.getPathName())
+					? extension(program, address, s)
+					: null;
+		if (extension != null) {
+			Address after = address.add(s.getLength());
+			if (program.getReferenceManager().getReferenceCountTo(after) == 0) {
+				place(program, after, extension);
+			}
+		}
+		return placed;
+	}
+
+	private static boolean place(Program program, Address address, Structure s) {
 		Listing listing = program.getListing();
 		MemoryBlock block = program.getMemory().getBlock(address);
 		if (block == null || block.isVolatile() ||
@@ -214,18 +289,122 @@ final class E200Data {
 		return true;
 	}
 
-	/** Whether an instruction is stray: of no function, and nothing flows to it */
+	/** How far a branch may lie from the instruction it flows to and be of its run */
+	private static final int RUN_REACH = 32;
+	/** How far the data around a run of stray instructions may lie for it to be cleared */
+	private static final int DATA_REACH = 32;
+
+	/**
+	 * Whether an instruction is stray: of no function, and nothing flows to it but the
+	 * instructions of its own run of instructions of no function, nearby, as data decoded to a
+	 * branch to itself
+	 */
 	static boolean stray(Program program, Instruction instruction) {
 		Address address = instruction.getAddress();
-		if (program.getListing().getFunctionContaining(address) != null) {
+		Listing listing = program.getListing();
+		if (listing.getFunctionContaining(address) != null) {
 			return false;
 		}
 		for (Reference ref : program.getReferenceManager().getReferencesTo(address)) {
-			if (ref.getReferenceType().isFlow()) {
+			if (ref.getReferenceType().isFlow() &&
+				!sameRun(listing, ref.getFromAddress(), instruction)) {
 				return false;
 			}
 		}
 		return true;
+	}
+
+	/**
+	 * Whether an address lies in the run of instructions of no function that an instruction
+	 * is in, within {@link #RUN_REACH} bytes of it
+	 */
+	private static boolean sameRun(Listing listing, Address from, Instruction instruction) {
+		Address a = instruction.getAddress();
+		if (!from.getAddressSpace().equals(a.getAddressSpace()) ||
+			Math.abs(from.subtract(a)) > RUN_REACH) {
+			return false;
+		}
+		Address lo = from.compareTo(a) < 0 ? from : a;
+		Address hi = from.compareTo(a) < 0 ? a : from;
+		for (Address p = lo; p != null && p.compareTo(hi) <= 0;) {
+			Instruction i = listing.getInstructionContaining(p);
+			if (i == null || listing.getFunctionContaining(p) != null) {
+				return false;
+			}
+			p = i.getMaxAddress().next();
+		}
+		return true;
+	}
+
+	/**
+	 * Clears the runs of stray instructions (see {@link #stray}) that lie between data, with
+	 * no symbol of the user's or of analysis: calibration data that the reference analysis
+	 * disassembled, as the addresses that instructions form and the pointers in tables lead
+	 * it to bytes that decode as code (all of a flash image is executable), where no data was
+	 * placed over it. Runs next to code, as the targets of computed branches and the
+	 * functions whose address code takes, stay. The "Found Code" bookmarks where data
+	 * replaced such code go too. Returns how many instructions were cleared.
+	 */
+	static int clearStrayCode(Program program, TaskMonitor monitor) throws CancelledException {
+		Listing listing = program.getListing();
+		SymbolTable symbols = program.getSymbolTable();
+		List<AddressRange> runs = new ArrayList<>();
+		Address start = null;
+		Address end = null;
+		boolean clearable = true;
+		for (Instruction i : listing.getInstructions(true)) {
+			monitor.checkCancelled();
+			boolean loose = listing.getFunctionContaining(i.getAddress()) == null;
+			if (start != null && (!loose || !i.getAddress().equals(end.next()))) {
+				if (clearable) {
+					runs.add(new AddressRangeImpl(start, end));
+				}
+				start = null;
+			}
+			if (!loose) {
+				continue;
+			}
+			if (start == null) {
+				start = i.getAddress();
+				clearable = true;
+			}
+			end = i.getMaxAddress();
+			Symbol primary = symbols.getPrimarySymbol(i.getAddress());
+			clearable &= (primary == null || primary.getSource() == SourceType.DEFAULT) &&
+				!symbols.isExternalEntryPoint(i.getAddress()) && stray(program, i);
+		}
+		if (start != null && clearable) {
+			runs.add(new AddressRangeImpl(start, end));
+		}
+		int cleared = 0;
+		for (AddressRange run : runs) {
+			monitor.checkCancelled();
+			CodeUnit before = listing.getDefinedCodeUnitBefore(run.getMinAddress());
+			CodeUnit after = listing.getDefinedCodeUnitAfter(run.getMaxAddress());
+			if (!(before instanceof Data) || !(after instanceof Data) ||
+				run.getMinAddress().subtract(before.getMaxAddress()) > DATA_REACH ||
+				after.getMinAddress().subtract(run.getMaxAddress()) > DATA_REACH) {
+				continue;
+			}
+			for (InstructionIterator i = listing.getInstructions(new AddressSet(run), true); i
+					.hasNext(); i.next()) {
+				cleared++;
+			}
+			listing.clearCodeUnits(run.getMinAddress(), run.getMaxAddress(), false);
+		}
+		BookmarkManager bookmarks = program.getBookmarkManager();
+		List<Bookmark> stale = new ArrayList<>();
+		Iterator<Bookmark> it = bookmarks.getBookmarksIterator(BookmarkType.ANALYSIS);
+		while (it.hasNext()) {
+			Bookmark b = it.next();
+			if ("Found Code".equals(b.getCategory()) &&
+				listing.getInstructionAt(b.getAddress()) == null &&
+				listing.getDefinedDataContaining(b.getAddress()) != null) {
+				stale.add(b);
+			}
+		}
+		stale.forEach(bookmarks::removeBookmark);
+		return cleared;
 	}
 
 	/**

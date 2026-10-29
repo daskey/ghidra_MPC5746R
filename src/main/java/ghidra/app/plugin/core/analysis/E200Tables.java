@@ -76,11 +76,13 @@ final class E200Tables {
 
 	/**
 	 * A load or store of {@code size} bytes, the value having {@code type}, at a constant
-	 * address plus an index times {@code stride}, or at the address if the stride is 0;
-	 * {@code inner} is the stride of a second, smaller index (0 if none) and {@code bound}
-	 * the number of elements the code allows (0 if unknown).
+	 * address plus an index times {@code stride}, or at the address if the stride is 0, in
+	 * the function with entry point {@code function}; {@code inner} is the stride of a
+	 * second, smaller index (0 if none) and {@code bound} the number of elements the code
+	 * allows (0 if unknown).
 	 */
-	record Access(Address address, int size, DataType type, long stride, long inner, int bound) {}
+	record Access(Address address, int size, DataType type, long stride, long inner, int bound,
+			Address function) {}
 
 	/** A table created */
 	private record Table(Address start, long stride, int count) {
@@ -111,6 +113,7 @@ final class E200Tables {
 	static List<Access> collect(HighFunction high) {
 		List<Access> accesses = new ArrayList<>();
 		Program program = high.getFunction().getProgram();
+		Address function = high.getFunction().getEntryPoint();
 		AddressSpace space = program.getAddressFactory().getDefaultAddressSpace();
 		Iterator<PcodeOpAST> ops = high.getPcodeOps();
 		while (ops.hasNext()) {
@@ -122,8 +125,18 @@ final class E200Tables {
 			Varnode value = opcode == PcodeOp.LOAD ? op.getOutput() : op.getInput(2);
 			Sum sum = new Sum();
 			add(op.getInput(1), 1, false, sum, 0);
-			long constant = sum.constant & space.getMaxAddress().getOffset();
-			if (value == null || !sum.ok || constant == 0) {
+			if (value == null || !sum.ok) {
+				continue;
+			}
+			// the table, or each of the tables that the code chooses between
+			List<Long> bases = new ArrayList<>();
+			for (long alternative : sum.alternatives == null ? List.of(0L) : sum.alternatives) {
+				long base = (sum.constant + alternative) & space.getMaxAddress().getOffset();
+				if (base != 0 && program.getMemory().getBlock(space.getAddress(base)) != null) {
+					bases.add(base);
+				}
+			}
+			if (bases.isEmpty()) {
 				continue;
 			}
 			int size = value.getSize();
@@ -141,8 +154,7 @@ final class E200Tables {
 					inner = Math.max(inner, t.scale());
 				}
 			}
-			Address address = space.getAddress(constant);
-			if (!ok || program.getMemory().getBlock(address) == null) {
+			if (!ok) {
 				continue;
 			}
 			DataType type = E200Integers.of(value.getHigh());
@@ -161,18 +173,27 @@ final class E200Tables {
 					type = new PointerDataType(pointee, 4, program.getDataTypeManager());
 				}
 			}
-			accesses.add(main == null ? new Access(address, size, type, 0, 0, 0)
-					: new Access(address, size, type, main.scale(),
-						inner == main.scale() ? 0 : inner, bound(main.index())));
+			int bound = main == null ? 0 : bound(program, main.index());
+			for (long base : bases) {
+				Address address = space.getAddress(base);
+				accesses.add(main == null ? new Access(address, size, type, 0, 0, 0, function)
+						: new Access(address, size, type, main.scale(),
+							inner == main.scale() ? 0 : inner, bound, function));
+			}
 		}
 		return accesses;
 	}
 
-	/** An address as a constant (modulo the address size) plus indexes times their strides */
+	/**
+	 * An address as a constant (modulo the address size) plus indexes times their strides,
+	 * and the addresses of the tables the code chooses between, if it does
+	 */
 	private static final class Sum {
 		long constant;
 		List<Term> terms = new ArrayList<>();
 		boolean ok = true;
+		/** The constants one of which is added, as in {@code (flag ? &a : &b)[i]} */
+		List<Long> alternatives;
 	}
 
 	private record Term(Varnode index, long scale) {}
@@ -233,6 +254,29 @@ final class E200Tables {
 				case PcodeOp.INT_SEXT:
 					add(def.getInput(0), scale, index, sum, depth + 1);
 					return;
+				case PcodeOp.MULTIEQUAL:
+					// one of several tables, as (flag ? &a : &b)[i]
+					if (!index && sum.alternatives == null) {
+						Set<Long> values = new LinkedHashSet<>();
+						for (int i = 0; values != null && i < def.getNumInputs(); i++) {
+							Long c = constantAddress(def.getInput(i), 0);
+							if (c == null) {
+								values = null;
+							}
+							else {
+								values.add(c * scale);
+							}
+						}
+						if (values != null && values.size() > 1) {
+							sum.alternatives = new ArrayList<>(values);
+							return;
+						}
+						if (values != null && values.size() == 1) {
+							sum.constant += values.iterator().next();
+							return;
+						}
+					}
+					break;
 				default:
 					break;
 			}
@@ -240,11 +284,35 @@ final class E200Tables {
 		sum.terms.add(new Term(v, scale));
 	}
 
+	/** The constant a value is, through copies and casts, or the address of a global; or null */
+	private static Long constantAddress(Varnode v, int depth) {
+		if (v == null || depth > 4) {
+			return null;
+		}
+		if (v.isConstant()) {
+			return v.getOffset();
+		}
+		PcodeOp def = v.getDef();
+		if (def == null) {
+			return null;
+		}
+		return switch (def.getOpcode()) {
+			case PcodeOp.COPY, PcodeOp.CAST -> constantAddress(def.getInput(0), depth + 1);
+			case PcodeOp.PTRSUB -> def.getInput(0).isConstant() &&
+				def.getInput(0).getOffset() == 0 && def.getInput(1).isConstant()
+						? def.getInput(1).getOffset()
+						: null;
+			default -> null;
+		};
+	}
+
 	/**
-	 * The number of elements an index can reach, from the comparisons of it with a constant
-	 * and masks of it, the largest; 0 if none gives at least two.
+	 * The number of elements an index can reach, from the comparisons of it with a constant,
+	 * or with a value that code reads from initialized memory, as the count of a table in
+	 * flash ({@code i < Xxx_Count}), and masks of it, the largest; 0 if none gives at least
+	 * two.
 	 */
-	private static int bound(Varnode index) {
+	private static int bound(Program program, Varnode index) {
 		int bound = 0;
 		Deque<Varnode> todo = new ArrayDeque<>();
 		Set<Object> seen = new HashSet<>();
@@ -276,12 +344,59 @@ final class E200Tables {
 								todo.add(use.getOutput());
 							}
 						}
-						default -> bound = Math.max(bound, compared(use, instance));
+						default -> bound = Math.max(bound, compared(program, use, instance));
 					}
 				}
 			}
 		}
 		return bound >= 2 && bound <= MAX_ELEMENTS ? bound : 0;
+	}
+
+	/**
+	 * The value that code reads from initialized memory, a global in flash read as it is or
+	 * through a load from its address, through copies, casts and extensions; -1 otherwise
+	 */
+	private static long stored(Program program, Varnode v) {
+		Memory memory = program.getMemory();
+		for (int depth = 0; v != null && depth < 4; depth++) {
+			Address address = null;
+			int size = v.getSize();
+			if (v.isAddress()) {
+				address = v.getAddress();
+			}
+			else {
+				PcodeOp def = v.getDef();
+				if (def == null) {
+					return -1;
+				}
+				switch (def.getOpcode()) {
+					case PcodeOp.COPY, PcodeOp.CAST, PcodeOp.INT_ZEXT, PcodeOp.INT_SEXT -> {
+						v = def.getInput(0);
+						continue;
+					}
+					case PcodeOp.LOAD -> address = E200Code.addressOf(program, def.getInput(1), 0);
+					default -> {
+						return -1;
+					}
+				}
+			}
+			MemoryBlock block = address == null ? null : memory.getBlock(address);
+			if (block == null || !block.isInitialized() || block.isVolatile()) {
+				return -1;
+			}
+			try {
+				return switch (size) {
+					case 1 -> memory.getByte(address) & 0xffL;
+					case 2 -> memory.getShort(address) & 0xffffL;
+					case 4 -> memory.getInt(address) & 0xffffffffL;
+					default -> -1;
+				};
+			}
+			catch (MemoryAccessException e) {
+				return -1;
+			}
+		}
+		return -1;
 	}
 
 	/**
@@ -300,17 +415,17 @@ final class E200Tables {
 	}
 
 	/** The elements a comparison of {@code v} with a constant allows, or 0 */
-	private static int compared(PcodeOp op, Varnode v) {
+	private static int compared(Program program, PcodeOp op, Varnode v) {
 		if (op.getNumInputs() != 2) {
 			return 0;
 		}
 		boolean left = op.getInput(0) == v;
 		Varnode other = op.getInput(left ? 1 : 0);
-		if (!other.isConstant() || E200Code.signed(other) <= 0 ||
-			E200Code.signed(other) >= MAX_ELEMENTS) {
+		long value = other.isConstant() ? E200Code.signed(other) : stored(program, other);
+		if (value <= 0 || value >= MAX_ELEMENTS) {
 			return 0;
 		}
-		int k = (int) E200Code.signed(other);
+		int k = (int) value;
 		if (k == 0xfe || k == 0xff || k == 0x100) {
 			return 0; // 0xff marks an index that is not valid, not the end of a table
 		}
@@ -543,6 +658,8 @@ final class E200Tables {
 				current.fields.put(f.getKey().subtract(current.start), f.getValue());
 			}
 		}
+		// the elements start where the widest fields are aligned
+		clusters.replaceAll(Cluster::aligned);
 		// larger tables first where several start at one address
 		clusters.sort(Comparator.comparing((Cluster c) -> c.start)
 				.thenComparing(c -> -c.stride));
@@ -557,10 +674,18 @@ final class E200Tables {
 			if (covered.contains(c) || tableContaining(c.start) != null) {
 				continue;
 			}
+			Cluster made = c;
 			Table table = c.create(starts, direct);
+			if (table == null && c.unaligned != null &&
+				tableContaining(c.unaligned.start) == null) {
+				// the cluster as the accesses found it, with the bound of the clusters it covers
+				made = c.unaligned;
+				made.coveredBound = c.coveredBound;
+				table = made.create(starts, direct);
+			}
 			if (table != null) {
 				tables.put(table.start(), table);
-				for (Long offset : c.layoutOffsets) {
+				for (Long offset : made.layoutOffsets) {
 					changed.add(table.start().add(offset));
 				}
 				created++;
@@ -608,10 +733,45 @@ final class E200Tables {
 		final List<Long> layoutOffsets = new ArrayList<>();
 		/** The bound of the clusters this one covers, in its elements */
 		int coveredBound;
+		/** The cluster as the accesses found it, where this one aligns its start */
+		Cluster unaligned;
 
 		Cluster(Address start, long stride) {
 			this.start = start;
 			this.stride = stride;
+		}
+
+		/**
+		 * The cluster with its start aligned down to the alignment of its widest fields (at
+		 * most 4), where the accesses do not reach the start of an element, as
+		 * {@code tbl[i].f2} with a pointer at {@code f4}: compilers align a structure as its
+		 * most aligned member. Only where those fields lie aligned in memory and all the
+		 * fields still fit in the stride; otherwise this cluster.
+		 */
+		Cluster aligned() {
+			int align = 1;
+			long end = 0;
+			for (Map.Entry<Long, List<Access>> e : fields.entrySet()) {
+				for (Access a : e.getValue()) {
+					align = Math.max(align, Math.min(4, Integer.highestOneBit(a.size())));
+					end = Math.max(end, e.getKey() + a.size());
+				}
+			}
+			long shift = start.getOffset() % align;
+			if (shift == 0 || stride % align != 0 || end + shift > stride) {
+				return this;
+			}
+			for (Map.Entry<Long, List<Access>> e : fields.entrySet()) {
+				for (Access a : e.getValue()) {
+					if (a.size() >= align && (start.getOffset() + e.getKey()) % align != 0) {
+						return this; // packed: the widest fields lie unaligned
+					}
+				}
+			}
+			Cluster c = new Cluster(start.subtract(shift), stride);
+			fields.forEach((offset, list) -> c.fields.put(offset + shift, list));
+			c.unaligned = this;
+			return c;
 		}
 
 		Table create(Set<Address> starts, TreeMap<Address, List<Access>> direct) {
@@ -712,6 +872,16 @@ final class E200Tables {
 				DataType type = field(fields.get(offset));
 				if (type == null || offset + type.getLength() > next) {
 					return null;
+				}
+				if (Undefined.isUndefined(type)) {
+					// the accesses do not type the field; the data of the first element may,
+					// as the uses of the global typed it (a float that code also copies)
+					Data data = listing.getDefinedDataAt(start.add(offset));
+					if (data != null && data.getLength() == type.getLength() &&
+						E200Types.primitive(data.getDataType()) &&
+						E200Types.informative(data.getDataType())) {
+						type = data.getDataType();
+					}
 				}
 				long inner = 0;
 				for (Access a : fields.get(offset)) {
@@ -828,17 +998,29 @@ final class E200Tables {
 
 		/**
 		 * The number of elements: up to the bound if there is one, otherwise to the next
-		 * element accessed or pointed to; never past an access, data or code that does not
-		 * fit, or another table.
+		 * element accessed or pointed to, unless only the functions that index the table
+		 * access it and they read or write it, as they read an element on its own too
+		 * ({@code a[i]} and {@code a[6]}; an address that code only passes starts another
+		 * object); never past an access, data or code that does not fit (stray instructions
+		 * are data that was disassembled), or another table.
 		 */
 		int count(DataType element, boolean single, int bound, long max,
 				Set<Address> starts, TreeMap<Address, List<Access>> direct) {
 			Address end = start.add(max * stride - 1);
 			AddressSet range = new AddressSet(start, end);
+			FunctionManager functions = program.getFunctionManager();
+			Set<Address> indexing = new HashSet<>(); // the functions that index the table
+			for (List<Access> list : fields.values()) {
+				for (Access a : list) {
+					indexing.add(a.function());
+				}
+			}
 			long conflict = max; // the first element with something that does not fit
-			InstructionIterator code = listing.getInstructions(range, true);
-			if (code.hasNext()) {
-				conflict = index(code.next().getAddress());
+			for (Instruction i : listing.getInstructions(range, true)) {
+				if (!E200Data.stray(program, i)) { // stray code is data that was disassembled
+					conflict = index(i.getAddress());
+					break;
+				}
 			}
 			for (Data data : listing.getDefinedData(range, true)) {
 				if (!E200Types.primitive(data.getDataType()) ||
@@ -852,43 +1034,55 @@ final class E200Tables {
 					conflict = Math.min(conflict, index(other)); // another table
 				}
 			}
-			// what code accesses directly, from the listing and the decompiler
-			TreeMap<Address, List<Integer>> accessed = new TreeMap<>();
+			// what code accesses directly, from the listing and the decompiler, with the
+			// function it is in (null for a pointer in data) and the type (null if unknown)
+			TreeMap<Address, List<Use>> accessed = new TreeMap<>();
 			for (Map.Entry<Address, List<Access>> e : direct.subMap(start, true, end, true)
 					.entrySet()) {
 				for (Access a : e.getValue()) {
-					accessed.computeIfAbsent(e.getKey(), x -> new ArrayList<>()).add(a.size());
+					accessed.computeIfAbsent(e.getKey(), x -> new ArrayList<>())
+							.add(new Use(a.size(), a.function(), a.type()));
 				}
 			}
 			AddressIterator it = references.getReferenceDestinationIterator(range, true);
 			while (it.hasNext()) {
 				Address a = it.next();
 				for (Reference ref : references.getReferencesTo(a)) {
+					Function f = functions.getFunctionContaining(ref.getFromAddress());
 					accessed.computeIfAbsent(a, x -> new ArrayList<>())
-							.add(E200Code.accessSize(listing.getInstructionAt(ref.getFromAddress())));
+							.add(new Use(
+								E200Code.accessSize(listing.getInstructionAt(ref.getFromAddress())),
+								f == null ? null : f.getEntryPoint(), null));
 				}
 			}
 			// pointers in data that is not typed yet, as in configuration tables
 			for (Address a : pointers()) {
 				if (range.contains(a)) {
-					accessed.computeIfAbsent(a, x -> new ArrayList<>()).add(0);
+					accessed.computeIfAbsent(a, x -> new ArrayList<>()).add(new Use(0, null, null));
 				}
 			}
-			for (Map.Entry<Address, List<Integer>> e : accessed.entrySet()) {
+			for (Map.Entry<Address, List<Use>> e : accessed.entrySet()) {
 				long index = index(e.getKey());
 				if (index >= conflict) {
 					break;
 				}
-				if (index > 0 && bound == 0) {
-					conflict = index; // another variable, or an element used on its own
-					break;
-				}
+				long offset = offset(e.getKey());
+				DataType field = typeAt(element, offset);
+				Data there = listing.getDefinedDataAt(e.getKey());
 				boolean fits = true;
-				for (int size : e.getValue()) {
-					fits &= fits(element, offset(e.getKey()), size);
+				// only the functions that index the table, which read or write the element as
+				// what the table holds there (a count after an array of pointers is no element)
+				boolean own = there == null || agrees(field, there.getDataType());
+				boolean read = false;
+				for (Use use : e.getValue()) {
+					fits &= fits(element, offset, use.size());
+					own &= use.function() != null && indexing.contains(use.function()) &&
+						agrees(field, use.type());
+					read |= use.size() > 0;
 				}
-				if (!fits) {
-					conflict = index;
+				own &= read;
+				if (!fits || index > 0 && bound == 0 && !own) {
+					conflict = index; // another variable, or an element used on its own
 					break;
 				}
 			}
@@ -921,6 +1115,43 @@ final class E200Tables {
 			pointers = E200Data.pointerTargets(program);
 		}
 		return pointers;
+	}
+
+	/** A direct access of a table's range: its size (0: the address only), function and type */
+	private record Use(int size, Address function, DataType type) {}
+
+	/**
+	 * Whether a type given at an element's field does not contradict the field's type: one of
+	 * them says nothing, or both are of one kind (integer, float or pointer)
+	 */
+	private static boolean agrees(DataType field, DataType type) {
+		return field == null || type == null || !E200Types.informative(field) ||
+			!E200Types.informative(type) || E200Types.kind(field) == E200Types.kind(type);
+	}
+
+	/** The single value an element holds at an offset, or null */
+	private static DataType typeAt(DataType element, long offset) {
+		DataType type = element;
+		while (true) {
+			if (type instanceof TypeDef t) {
+				type = t.getBaseDataType();
+			}
+			if (type instanceof Structure s) {
+				DataTypeComponent c = s.getComponentContaining((int) offset);
+				if (c == null || c.getDataType() instanceof DefaultDataType) {
+					return null;
+				}
+				offset -= c.getOffset();
+				type = c.getDataType();
+			}
+			else if (type instanceof Array a) {
+				offset %= a.getElementLength();
+				type = a.getDataType();
+			}
+			else {
+				return offset == 0 ? type : null;
+			}
+		}
 	}
 
 	/** Whether an access of {@code size} bytes (0: the address only) at {@code offset} fits */
