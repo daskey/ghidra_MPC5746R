@@ -77,6 +77,8 @@ final class E200Structures {
 		private final Map<PcodeOp, Long> loads = new IdentityHashMap<>();
 		/** The casts of fields' values after arithmetic, to resolve to their guards */
 		private final List<Map.Entry<Field, PcodeOp>> pendingCasts = new ArrayList<>();
+		/** The indexes the pointer this shape describes is indexed with, while walked */
+		private final List<Varnode> indexes = new ArrayList<>();
 
 		boolean isEmpty() {
 			return fields.isEmpty() && stride == 0;
@@ -163,12 +165,25 @@ final class E200Structures {
 		}
 
 		/**
-		 * Resolves the casts of the fields' values to the comparisons that guard them (see
-		 * {@link E200Code#guard}): where {@code p->f10 == 8} holds on the way to
-		 * {@code (ushort *)p->fc}, f10 selects fc's element size, 2 for the value 8. Called
-		 * once a function is walked; drops the p-code kept for it.
+		 * Resolves what the function's p-code says about the fields to the fields: the
+		 * comparisons that guard the casts of the fields' values (see {@link E200Code#guard};
+		 * where {@code p->f10 == 8} holds on the way to {@code (ushort *)p->fc}, f10 selects
+		 * fc's element size, 2 for the value 8), and the fields the indexes of the accesses
+		 * through a pointer field derive from ({@code p->x[p->n - 1]}: n counts x's
+		 * elements). Called once a function is walked; drops the p-code kept for it.
 		 */
 		void resolveGuards() {
+			for (Field f : fields.values()) {
+				for (Varnode index : f.target.indexes) {
+					for (Map.Entry<PcodeOp, Boolean> e : E200Code.loadsBehind(index, 256)
+							.entrySet()) {
+						Long offset = loads.get(e.getKey());
+						if (offset != null && e.getValue()) {
+							f.indexFields.add(offset); // through arithmetic: a bound, not an index
+						}
+					}
+				}
+			}
 			for (Map.Entry<Field, PcodeOp> e : pendingCasts) {
 				Map.Entry<Varnode, Long> guard = E200Code.guard(e.getValue());
 				PcodeOp load = guard == null ? null : E200Code.loadOf(guard.getKey());
@@ -182,6 +197,7 @@ final class E200Structures {
 			}
 			pendingCasts.clear();
 			loads.clear();
+			indexes.clear();
 			for (Field f : fields.values()) {
 				f.target.resolveGuards();
 			}
@@ -240,6 +256,11 @@ final class E200Structures {
 		 * {@code p->f10 == 8} holds
 		 */
 		final Map<Long, Map<Long, Integer>> selectorSizes = new TreeMap<>();
+		/**
+		 * The offsets of the fields of the structure that the indexes of the accesses
+		 * through this field's value derive from: the count fields of the array it points to
+		 */
+		final Set<Long> indexFields = new TreeSet<>();
 		/** The entry points of functions stored in the field */
 		final Set<Address> targets = new TreeSet<>();
 		/** The calls through the field's value */
@@ -258,6 +279,7 @@ final class E200Structures {
 			other.selectorSizes.forEach((offset, sizes) -> selectorSizes
 					.computeIfAbsent(offset, k -> new TreeMap<>())
 					.putAll(sizes));
+			indexFields.addAll(other.indexFields);
 			targets.addAll(other.targets);
 			calls.addAll(other.calls);
 		}
@@ -341,7 +363,7 @@ final class E200Structures {
 						}
 					}
 					else if (offset == 0 && op.getOpcode() == PcodeOp.INT_ADD) {
-						index(functions, out, E200Code.stride(other), shape, seen, depth);
+						index(functions, out, other, E200Code.stride(other), shape, seen, depth);
 					}
 				}
 				case PcodeOp.PTRADD -> {
@@ -356,8 +378,8 @@ final class E200Structures {
 						}
 					}
 					else if (offset == 0) {
-						index(functions, out, size * E200Code.stride(op.getInput(1)), shape, seen,
-							depth);
+						index(functions, out, op.getInput(1),
+							size * E200Code.stride(op.getInput(1)), shape, seen, depth);
 					}
 				}
 				case PcodeOp.LOAD -> {
@@ -421,9 +443,13 @@ final class E200Structures {
 		}
 	}
 
-	/** The pointer indexed with {@code stride}: an element, whose fields are the shape's */
-	private static void index(FunctionManager functions, Varnode element, long stride,
-			Shape shape, Set<Varnode> seen, int depth) {
+	/**
+	 * The pointer indexed with {@code index}, of {@code stride}: an element, whose fields are
+	 * the shape's
+	 */
+	private static void index(FunctionManager functions, Varnode element, Varnode index,
+			long stride, Shape shape, Set<Varnode> seen, int depth) {
+		shape.indexes.add(index);
 		if (stride <= 1 || stride > MAX_OFFSET) {
 			return; // bytes, as in a buffer
 		}
@@ -531,7 +557,7 @@ final class E200Structures {
 			if (type instanceof Pointer p && !E200Types.informative(p) &&
 				(!f.casts.isEmpty() || !f.elementCasts.isEmpty())) {
 				// the code chooses what it points to at run time: the types it casts it to,
-				// for the arrays at the instances (see E200FieldArrays)
+				// and the selector, for the arrays at the instances (see E200FieldArrays)
 				List<DataType> casts = new ArrayList<>(f.casts);
 				casts.addAll(f.elementCasts);
 				String comment = castsComment(casts);
@@ -545,6 +571,15 @@ final class E200Structures {
 		if (types.isEmpty()) {
 			return null;
 		}
+		// the fields that count the elements of the arrays the pointer fields point to: the
+		// integer fields the indexes derive from, now that the fields have their types
+		for (Map.Entry<Long, Field> e : shape.fields.entrySet()) {
+			String count = countComment(e.getValue(), types);
+			if (count != null && types.get(e.getKey()) instanceof Pointer) {
+				comments.merge(e.getKey(), count, (a, b) -> a + "; " + b);
+			}
+		}
+		comments.values().removeIf(String::isEmpty);
 		// padded to the alignment of its widest field
 		long align = 1;
 		for (DataType t : types.values()) {
@@ -577,6 +612,27 @@ final class E200Structures {
 		DataTypeComponent c = s.getComponentContaining((int) offset);
 		return c == null || c.getDataType() instanceof DefaultDataType ||
 			c.getOffset() == offset && (c.getLength() == size || size == 1);
+	}
+
+	/**
+	 * {@code f0 * f2 elements}: the integer fields that the indexes of the accesses through
+	 * the field's value derive from, one or two of them, which count the elements of the
+	 * array it points to (the pointer fields they also derive from, as the search loops take
+	 * the difference of two pointers, do not count); null for none or more
+	 */
+	private static String countComment(Field f, Map<Long, DataType> types) {
+		List<String> names = new ArrayList<>();
+		for (long offset : f.indexFields) {
+			DataType t = types.get(offset);
+			if (t != null && t.getLength() <= 4 &&
+				(E200Types.integer(t) || Undefined.isUndefined(t))) {
+				names.add("f" + Long.toHexString(offset));
+			}
+		}
+		if (names.isEmpty() || names.size() > 2) {
+			return null;
+		}
+		return String.join(" * ", names) + " elements";
 	}
 
 	/**
@@ -712,6 +768,13 @@ final class E200Structures {
 			}
 			else if (current.getOffset() != offset || current.getLength() != length ||
 				!refinable(current.getDataType(), type)) {
+				// the type stays; what the round shows about the field's arrays may be new
+				if (current.getOffset() == offset && current.getLength() == length &&
+					c.getComment() != null && !c.getComment().equals(current.getComment())) {
+					existing.replaceAtOffset(offset, current.getDataType(), length,
+						current.getFieldName(), mergedComment(c.getComment(), current.getComment()));
+					changed++;
+				}
 				continue;
 			}
 			String comment = c.getComment() != null ? c.getComment()
@@ -720,6 +783,28 @@ final class E200Structures {
 			changed++;
 		}
 		return changed;
+	}
+
+	/**
+	 * The comment a round built for a field, with the parts of the field's comment so far
+	 * that it lacks (the count the instances voted, the selector): the code of a later round
+	 * says more, the instances still what they said
+	 */
+	private static String mergedComment(String built, String existing) {
+		if (existing == null) {
+			return built;
+		}
+		List<String> parts = new ArrayList<>(List.of(built.split("; ")));
+		for (String part : existing.split("; ")) {
+			boolean count = part.endsWith(" elements");
+			boolean selector = part.startsWith("element size by");
+			boolean has = parts.stream().anyMatch(
+				q -> count && q.endsWith(" elements") || selector && q.startsWith("element size by"));
+			if ((count || selector) && !has) {
+				parts.add(part);
+			}
+		}
+		return String.join("; ", parts);
 	}
 
 	/**

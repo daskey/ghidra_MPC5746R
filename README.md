@@ -173,7 +173,7 @@ functions, runs the parts below in rounds and logs what they did:
   A type is applied only when the uses agree, except that a `float` wins over integers of
   its size and integers that differ in signedness go to a clear majority. Single bytes
   become `byte` or `sbyte`. Addresses used as pointers to a type get data of that type, as
-  in `FUN_08faf3e0(&SHORT_09294ba0, x)`, also where the reference analysis left undefined
+  in `f(&SHORT_<address>, x)`, also where the reference analysis left undefined
   data of another size at an address an instruction only forms, as long as nothing accesses
   that data as it is.
 - **Arrays and tables** (`E200Tables.java`): code reads an element of a global array at the
@@ -183,8 +183,10 @@ functions, runs the parts below in rounds and logs what they did:
   array of the field's type if one field fills the stride, otherwise an array of a structure
   `S_<address>` with fields `f<offset>` (also those code accesses directly in the first
   element), labeled `tbl_<address>`. A field indexed again, as in a two-dimensional array,
-  is an array itself. The decompiler then shows `tbl_08f9e258[i].f4` instead of
-  `(&BYTE_08f9e25c)[i * 8]`. The length comes from comparisons of the index with a constant
+  is an array itself; a pointer field points to what the code reads through it
+  (`*tbl[i].f4` as a byte: `byte *`, and the calibration bytes the records point to get
+  the type). The decompiler then shows `tbl_<address>[i].f4` instead of
+  `(&BYTE_<address>)[i * 8]`. The length comes from comparisons of the index with a constant
   (`i < 8`, not `i != 0xff`) and masks (`i & 7`); without one, a table reaches the next
   element that code accesses or that a pointer in memory points to, within 512 bytes (an
   array of structures keeps one element if there is none). A table never takes in an access
@@ -229,7 +231,7 @@ functions, runs the parts below in rounds and logs what they did:
   The instances that code passes by address bound the structure's length, since none holds
   another: a lookup function reads the scale and offset of a map descriptor whether or not
   the descriptor has them, and the curve descriptors 12 bytes apart give a structure of 12
-  bytes, so that `lookup(&P_50800274_0928b4b4, x)` needs no cast at the hundreds of calls
+  bytes, so that `lookup(&P_<lookup>_<address>, x)` needs no cast at the hundreds of calls
   and the two fields past the end show in the one function that reads them. Where the data at
   the instances is in smaller pieces than a field, as the `byte` that code reads where a
   function writes a `ushort` of the value and its complement, the structure has the pieces as
@@ -241,22 +243,27 @@ functions, runs the parts below in rounds and logs what they did:
   an address in flash that code passes as a pointer starts another object, and the structure
   does not go over it), and the data its pointer fields point to gets the pointed-to type
   (a byte for a `void *`; all of flash is executable in an image, and the reference analysis
-  would disassemble an undefined target): `lookup(&P_50800274_092923ec, x)` instead of
-  `lookup((P_50800274 *)&USHORT_092923ec, x)`, also where it is one of several the code
+  would disassemble an undefined target): `lookup(&P_<lookup>_<address>, x)` instead of
+  `lookup((P_<lookup> *)&USHORT_<address>, x)`, also where it is one of several the code
   chooses between (`flag ? &a : &b`) and where a table of pointers to such data points to it.
   A constant that is an address in RAM or flash,
   passed where a pointer to a type is expected, gets data of that type there, so that the
-  decompiler shows `&USHORT_4000d178` instead of `(ushort *)0x4000d178`.
+  decompiler shows `&USHORT_<address>` instead of `(ushort *)0x<address>`.
 - **Arrays that pointer fields point to** (`E200FieldArrays.java`): a descriptor in flash,
   as of a calibration map, holds the lengths of the arrays it points to
   (`{short nx; short ny; float *x; float *y; void *values; byte type}`), and the lookup
   function indexes them with bounds it reads from the descriptor, so no array has a length
   in the code. The instances of the structure show the arrays: the data at the target of a
   pointer field reaches the next address that a pointer in memory points to, that code
-  references or that holds data or code. An integer field whose value is the number of
-  elements in that gap at most instances, or the product of two, is the count field of the
-  pointer field, and gives the length where the gap holds padding; the field's comment
-  records it (`f0 * f2 elements`). A pointer field whose element type the code chooses at
+  references or that holds data or code. The count field of the pointer field is the field
+  the code indexes the array by, found in the code that reads the structure: the integer
+  fields that the index of an access through the pointer derives from through arithmetic
+  (`p->x[p->n - 1]`; the values of a map by `nx * iy + ix`), one or two of them; a field
+  that is the index as it is (`p->x[p->i]`) is an index, not a count. The field's comment
+  records it (`f0 * f2 elements`), and the arrays get the count's length where the gap
+  holds padding. Where the code shows no count, or another candidate fills the gaps of
+  more instances exactly, an integer field whose value is the number of elements in the
+  gap at most instances, or the product of two, is taken. A pointer field whose element type the code chooses at
   run time (`void *`, cast to `float *`, `ushort *` and `byte *` after indexing) gets at
   each instance the type whose size fits, and an integer field whose value says which size
   is its selector (`element size by f10`); the sizes the lookup's code gives the selector's
@@ -267,7 +274,10 @@ functions, runs the parts below in rounds and logs what they did:
   curves then decompile as `float[18]`, `float[20]` and `byte[360]` at their descriptors.
   Stray instructions in the way, of no function and with nothing flowing to them, are
   calibration data that was disassembled and are replaced, as are, where a count field gives
-  the length, the strings the string analysis made of the values.
+  the length, the strings the string analysis made of the values; the words in the array, or
+  in other arrays of values, that happen to be addresses do not bound it, and the arrays of
+  integers that code reading a calibration region word by word made over it are carved
+  around it.
 - **Pointers to functions** (`E200FunctionPointers.java`): a pointer in flash, an element of
   an array of pointers or a pointer field of a structure whose values are all entry points of
   functions (or null) gets a pointer to a function definition: the functions' signature where
@@ -275,7 +285,7 @@ functions, runs the parts below in rounds and logs what they did:
   (the handlers in a table are called alike), as long as it is plausible for C (a
   hand-written routine that reads all the argument registers gets eight from Decompiler
   Parameter ID). Handlers called through tables then decompile as
-  `(*tbl_08fab6f4[i].f4)(x)` instead of `(*(code *)tbl_08fab6f4[i].f4)(x)`. A parameter,
+  `(*tbl_<address>[i].f4)(x)` instead of `(*(code *)tbl_<address>[i].f4)(x)`. A parameter,
   global, return value or structure field that code calls through, or that gets the entry
   point of a function (`PTR_40008000 = FUN_08fa1234`, `f(handler)`), gets a pointer to a
   function definition too: the functions' where they are known and agree, else one with the
@@ -293,7 +303,7 @@ functions, runs the parts below in rounds and logs what they did:
   before every use (`param_1 & 0xff`) is a `byte` or `ushort` (Decompiler Parameter ID gives
   it the register's four bytes), and so is a return value that every caller uses so, or
   that the function itself extends from a byte or halfword on every return (`return
-  (uint)BYTE_4000e5d8;` returns a `byte`, whatever the callers do with the register). A
+  (uint)BYTE_<address>;` returns a `byte`, whatever the callers do with the register). A
   value that a function only passes on to another function or returns has the width of the
   place it goes to, and a parameter whose uses say nothing, as one the function ignores, the
   width of the values its callers pass, when all of them are small constants or values
@@ -353,9 +363,9 @@ decompiled, per image:
 | Functions with `extraout_` variables | 31 | 30-31 |
 | `undefinedN` in the C | 1,329 | 1,323-1,334 |
 | `DAT_` references in the C | 451 | 442-461 |
-| Pointer casts in the C | 4,379 | 4,179-4,516 |
+| Pointer casts in the C | 4,379 | 4,178-4,515 |
 | Calls through `(code *)` casts | 29 | 29 |
-| Analysis time (2 CPUs) | 288 s | 260 s-309 s |
+| Analysis time (2 CPUs) | 283 s | 253 s-302 s |
 
 Most decompiler warnings are about infinite loops (halt loops) and unreachable blocks the
 decompiler removes; the `extraout_` and `undefined` signatures are in hand-written
@@ -399,6 +409,13 @@ the Ghidra release whose PowerPC files are included.
   branch, load/store and EFPU2 instructions, all those the test images use except the
   opaque ones, against an independent Python model of the Power ISA; all pass (5,688 failed
   with Ghidra's semantics). See `tools/vle_test`.
+- **Register usage:** the parameters of the 3,336 functions of an AUTOSAR build with DWARF,
+  compared with the ELF's DWARF locations at the function's
+  entry: of the 3,403 parameters DWARF places in a register, the analysis has 3,216 in the
+  same register and 3 in another (two of them ninth parameters, which the ABI passes on
+  the stack); 182 are parameters the analysis misses and 40 ones it adds. The parameters
+  of every function it typed follow the EABI order from r3, with 64-bit values in odd-even
+  pairs. See `analysis/dwarf_params.py`.
 - **Firmware:** the disassembly of four MPC5746R images (1.3 million instructions) matches
   NXP's binutils 2.28 apart from mnemonic aliases, the e200z425 saturated math and
   `e_ldmvmcsrrw`/`e_stmvmcsrrw`, which binutils 2.28 lacks, and the instructions below.
