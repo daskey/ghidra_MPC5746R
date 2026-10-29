@@ -108,7 +108,8 @@ final class E200Data {
 			return false;
 		}
 		AddressSet range = new AddressSet(address, end);
-		if (!strayCode(program, range) || !block.isWrite() && passedInside(program, address, end)) {
+		if (!strayCode(program, range) ||
+			block.isInitialized() && passedInside(program, address, end)) {
 			return false;
 		}
 		for (Data d : listing.getDefinedData(range, true)) {
@@ -152,9 +153,9 @@ final class E200Data {
 
 	/**
 	 * Whether code passes an address after {@code address} and up to {@code end} as a pointer:
-	 * in flash, another object starts there, as the next descriptor does where a lookup's
-	 * structure holds the fields of a longer variant of the descriptor (in RAM, code passes
-	 * the fields of a module's state by address)
+	 * in flash (initialized bytes), another object starts there, as the next descriptor does
+	 * where a lookup's structure holds the fields of a longer variant of the descriptor (in
+	 * RAM, code passes the fields of a module's state by address)
 	 */
 	private static boolean passedInside(Program program, Address address, Address end) {
 		Address from = address.next();

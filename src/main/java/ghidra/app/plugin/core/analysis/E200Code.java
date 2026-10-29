@@ -24,8 +24,7 @@ import ghidra.program.model.lang.Register;
 import ghidra.program.model.listing.*;
 import ghidra.program.model.mem.Memory;
 import ghidra.program.model.mem.MemoryBlock;
-import ghidra.program.model.pcode.PcodeOp;
-import ghidra.program.model.pcode.Varnode;
+import ghidra.program.model.pcode.*;
 
 /**
  * What code shows (shared by the steps of {@link E200Analyzer}): the executable memory of a
@@ -219,6 +218,15 @@ final class E200Code {
 	 */
 	static List<DataType> castsAfterArithmetic(Varnode value) {
 		List<DataType> casts = new ArrayList<>();
+		for (PcodeOp op : castOpsAfterArithmetic(value)) {
+			casts.add(op.getOutput().getHigh().getDataType());
+		}
+		return casts;
+	}
+
+	/** The CAST ops of {@link #castsAfterArithmetic} */
+	static List<PcodeOp> castOpsAfterArithmetic(Varnode value) {
+		List<PcodeOp> casts = new ArrayList<>();
 		Set<Varnode> seen = new HashSet<>();
 		Deque<Varnode> todo = new ArrayDeque<>();
 		todo.add(value);
@@ -235,7 +243,7 @@ final class E200Code {
 					case PcodeOp.CAST -> {
 						DataType t = out.getHigh() == null ? null : out.getHigh().getDataType();
 						if (t instanceof Pointer && E200Types.informative(t)) {
-							casts.add(t);
+							casts.add(op);
 						}
 						else {
 							todo.add(out); // to an integer, for the arithmetic
@@ -250,6 +258,88 @@ final class E200Code {
 			}
 		}
 		return casts;
+	}
+
+	/**
+	 * The comparison with a constant that holds where an op is: the op's block is the branch
+	 * that {@code x == 8} leads to (or the other branch of {@code x != 8}), up a chain of
+	 * blocks with one predecessor each; the value compared and the constant, or null
+	 */
+	static Map.Entry<Varnode, Long> guard(PcodeOp op) {
+		if (!(op instanceof PcodeOpAST ast)) {
+			return null;
+		}
+		PcodeBlock block = ast.getParent();
+		for (int depth = 0; block != null && depth < 6; depth++) {
+			for (int i = 0; i < block.getInSize(); i++) {
+				PcodeBlock in = block.getIn(i);
+				PcodeOp last = in instanceof PcodeBlockBasic basic ? basic.getLastOp() : null;
+				if (last == null || last.getOpcode() != PcodeOp.CBRANCH) {
+					continue;
+				}
+				Map.Entry<Varnode, Long> comparison =
+					comparison(last.getInput(1), in.getTrueOut() == block);
+				if (comparison != null) {
+					return comparison;
+				}
+			}
+			block = block.getInSize() == 1 ? block.getIn(0) : null;
+		}
+		return null;
+	}
+
+	/**
+	 * The value and constant that a condition says are equal, if it {@code holds}, or that
+	 * it says differ if it does not; null for other conditions
+	 */
+	private static Map.Entry<Varnode, Long> comparison(Varnode condition, boolean holds) {
+		PcodeOp def = condition == null ? null : condition.getDef();
+		if (def == null) {
+			return null;
+		}
+		switch (def.getOpcode()) {
+			case PcodeOp.BOOL_NEGATE -> {
+				return comparison(def.getInput(0), !holds);
+			}
+			case PcodeOp.INT_EQUAL, PcodeOp.INT_NOTEQUAL -> {
+				if (def.getOpcode() == PcodeOp.INT_EQUAL != holds) {
+					return null; // the branch where they differ says nothing
+				}
+				Varnode a = def.getInput(0);
+				Varnode b = def.getInput(1);
+				if (b.isConstant() && !a.isConstant()) {
+					return Map.entry(a, b.getOffset());
+				}
+				if (a.isConstant() && !b.isConstant()) {
+					return Map.entry(b, a.getOffset());
+				}
+				return null;
+			}
+			default -> {
+				return null;
+			}
+		}
+	}
+
+	/** The LOAD a value comes from, through copies, casts and extensions; null if none */
+	static PcodeOp loadOf(Varnode value) {
+		for (int depth = 0; value != null && depth < 6; depth++) {
+			PcodeOp def = value.getDef();
+			if (def == null) {
+				return null;
+			}
+			switch (def.getOpcode()) {
+				case PcodeOp.LOAD -> {
+					return def;
+				}
+				case PcodeOp.COPY, PcodeOp.CAST, PcodeOp.INT_ZEXT, PcodeOp.INT_SEXT -> value =
+					def.getInput(0);
+				default -> {
+					return null;
+				}
+			}
+		}
+		return null;
 	}
 
 	/** The value of a constant varnode, sign extended from its size */

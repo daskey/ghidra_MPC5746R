@@ -73,6 +73,10 @@ final class E200Structures {
 		final TreeMap<Long, Field> fields = new TreeMap<>();
 		long stride;
 		boolean mixed;
+		/** The loads of the fields while a function is walked, by offset (see resolveGuards) */
+		private final Map<PcodeOp, Long> loads = new IdentityHashMap<>();
+		/** The casts of fields' values after arithmetic, to resolve to their guards */
+		private final List<Map.Entry<Field, PcodeOp>> pendingCasts = new ArrayList<>();
 
 		boolean isEmpty() {
 			return fields.isEmpty() && stride == 0;
@@ -158,6 +162,31 @@ final class E200Structures {
 			return true;
 		}
 
+		/**
+		 * Resolves the casts of the fields' values to the comparisons that guard them (see
+		 * {@link E200Code#guard}): where {@code p->f10 == 8} holds on the way to
+		 * {@code (ushort *)p->fc}, f10 selects fc's element size, 2 for the value 8. Called
+		 * once a function is walked; drops the p-code kept for it.
+		 */
+		void resolveGuards() {
+			for (Map.Entry<Field, PcodeOp> e : pendingCasts) {
+				Map.Entry<Varnode, Long> guard = E200Code.guard(e.getValue());
+				PcodeOp load = guard == null ? null : E200Code.loadOf(guard.getKey());
+				Long selector = load == null ? null : loads.get(load);
+				DataType t = e.getValue().getOutput().getHigh().getDataType();
+				if (selector != null && t instanceof Pointer p && p.getDataType() != null &&
+					p.getDataType().getLength() > 0) {
+					e.getKey().selectorSizes.computeIfAbsent(selector, k -> new TreeMap<>())
+							.putIfAbsent(guard.getValue(), p.getDataType().getLength());
+				}
+			}
+			pendingCasts.clear();
+			loads.clear();
+			for (Field f : fields.values()) {
+				f.target.resolveGuards();
+			}
+		}
+
 		/** The accesses of all the fields, as those of one element */
 		Field element() {
 			Field element = new Field();
@@ -205,6 +234,12 @@ final class E200Structures {
 		 * {@code *(ushort *)((int)p->f8 + i * 2)}: the element types the code chooses between
 		 */
 		final List<DataType> elementCasts = new ArrayList<>();
+		/**
+		 * The element size each value of a selector field of the structure gives, by the
+		 * selector's offset: the code casts the field's value to {@code (ushort *)} where
+		 * {@code p->f10 == 8} holds
+		 */
+		final Map<Long, Map<Long, Integer>> selectorSizes = new TreeMap<>();
 		/** The entry points of functions stored in the field */
 		final Set<Address> targets = new TreeSet<>();
 		/** The calls through the field's value */
@@ -220,6 +255,9 @@ final class E200Structures {
 			target.merge(other.target);
 			casts.addAll(other.casts);
 			elementCasts.addAll(other.elementCasts);
+			other.selectorSizes.forEach((offset, sizes) -> selectorSizes
+					.computeIfAbsent(offset, k -> new TreeMap<>())
+					.putAll(sizes));
 			targets.addAll(other.targets);
 			calls.addAll(other.calls);
 		}
@@ -256,6 +294,7 @@ final class E200Structures {
 				if (callee != null) {
 					Shape shape = new Shape();
 					walk(functions, op.getOutput(), 0, shape, new HashSet<>(), 0);
+					shape.resolveGuards();
 					if (!shape.isEmpty()) {
 						facts.shapes.add(Map.entry(new Return(callee.getEntryPoint()), shape));
 					}
@@ -274,6 +313,7 @@ final class E200Structures {
 		for (Varnode instance : variable.getInstances()) {
 			walk(functions, instance, 0, shape, seen, 0);
 		}
+		shape.resolveGuards();
 		if (!shape.isEmpty()) {
 			facts.shapes.add(Map.entry(slot, shape));
 		}
@@ -323,13 +363,18 @@ final class E200Structures {
 				case PcodeOp.LOAD -> {
 					if (op.getInput(1) == v && out != null) {
 						Field f = shape.field(offset);
+						shape.loads.put(op, offset);
 						f.accesses.add(new Access(out.getSize(), E200Integers.of(out)));
 						if (out.getSize() == 4) {
 							DataType cast = E200Code.castTo(out);
 							if (cast != null) {
 								f.casts.add(cast);
 							}
-							f.elementCasts.addAll(E200Code.castsAfterArithmetic(out));
+							for (PcodeOp elementCast : E200Code.castOpsAfterArithmetic(out)) {
+								f.elementCasts.add(
+									elementCast.getOutput().getHigh().getDataType());
+								shape.pendingCasts.add(Map.entry(f, elementCast));
+							}
 							calls(out, f.calls, 0);
 							if (depth < MAX_DEPTH) {
 								walk(functions, out, 0, f.target, new HashSet<>(), depth + 1);
@@ -489,7 +534,10 @@ final class E200Structures {
 				// for the arrays at the instances (see E200FieldArrays)
 				List<DataType> casts = new ArrayList<>(f.casts);
 				casts.addAll(f.elementCasts);
-				comments.put(offset, castsComment(casts));
+				String comment = castsComment(casts);
+				String selector = selectorComment(f);
+				comments.put(offset, comment == null ? selector : selector == null ? comment
+						: comment + "; " + selector);
 			}
 			types.put(offset, type);
 			end = offset + size;
@@ -529,6 +577,33 @@ final class E200Structures {
 		DataTypeComponent c = s.getComponentContaining((int) offset);
 		return c == null || c.getDataType() instanceof DefaultDataType ||
 			c.getOffset() == offset && (c.getLength() == size || size == 1);
+	}
+
+	/**
+	 * {@code element size by f10: 0=4, 4=1, 8=2}: the selector field the code compares with
+	 * the most constants on the way to the casts, and the element size each gives (see
+	 * E200FieldArrays); null if no field is compared with two
+	 */
+	private static String selectorComment(Field f) {
+		Map.Entry<Long, Map<Long, Integer>> best = null;
+		for (Map.Entry<Long, Map<Long, Integer>> e : f.selectorSizes.entrySet()) {
+			if (e.getValue().size() >= 2 &&
+				(best == null || e.getValue().size() > best.getValue().size())) {
+				best = e;
+			}
+		}
+		if (best == null) {
+			return null;
+		}
+		StringBuilder sb = new StringBuilder("element size by f")
+				.append(Long.toHexString(best.getKey()))
+				.append(':');
+		String separator = " ";
+		for (Map.Entry<Long, Integer> e : best.getValue().entrySet()) {
+			sb.append(separator).append(Long.toHexString(e.getKey())).append('=').append(e.getValue());
+			separator = ", ";
+		}
+		return sb.toString();
 	}
 
 	/** {@code cast to /float, /ushort}: the distinct types the casts point to, by path */
