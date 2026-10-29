@@ -336,7 +336,16 @@ final class E200Data {
 	 * data that code may only reach through them
 	 */
 	static Set<Address> pointerTargets(Program program) {
-		Set<Address> targets = new HashSet<>();
+		return pointerSources(program).keySet();
+	}
+
+	/**
+	 * The addresses that aligned words of initialized memory hold, outside code, and the
+	 * addresses of the words that hold each: a word in an array of values that happens to be
+	 * an address is no pointer
+	 */
+	static Map<Address, List<Address>> pointerSources(Program program) {
+		Map<Address, List<Address>> targets = new HashMap<>();
 		Memory memory = program.getMemory();
 		Listing listing = program.getListing();
 		AddressSpace space = program.getAddressFactory().getDefaultAddressSpace();
@@ -363,9 +372,9 @@ final class E200Data {
 					continue;
 				}
 				Address target = space.getAddress(value);
-				if (memory.contains(target) &&
-					listing.getInstructionContaining(block.getStart().add(i)) == null) {
-					targets.add(target);
+				Address source = block.getStart().add(i);
+				if (memory.contains(target) && listing.getInstructionContaining(source) == null) {
+					targets.computeIfAbsent(target, t -> new ArrayList<>(1)).add(source);
 				}
 			}
 		}

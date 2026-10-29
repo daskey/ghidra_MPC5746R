@@ -40,10 +40,12 @@ import ghidra.util.task.TaskMonitor;
  * of a pointer field reaches the next address that a pointer in memory points to, that code
  * references or that holds data or code, and the gap is the array.
  * <p>
- * An integer field of the structure whose value is the number of elements in the gap at
- * most instances, or the product of two such fields, is the count field of the pointer
- * field: it gives the length where the gap holds padding, and the field's comment records it
- * ({@code f0 * f2 elements}). A pointer field whose element type the code chooses at run
+ * The count field of the pointer field is the field the code indexes the array by, which
+ * E200Structures finds in the code that reads the structure ({@code p->x[p->n - 1]}) and
+ * records in the field's comment ({@code f0 * f2 elements}); where the code shows none, an
+ * integer field of the structure whose value is the number of elements in the gap at most
+ * instances, or the product of two such fields, is taken for it, and recorded the same
+ * way. The count gives the length where the gap holds padding. A pointer field whose element type the code chooses at run
  * time, casting the pointer to several types, gets at each instance the type whose size
  * fits the gap, and an integer field whose value says which size, at the instances where
  * one fits, is its selector ({@code element size by f10}); the sizes the code gives the
@@ -51,7 +53,10 @@ import ghidra.util.task.TaskMonitor;
  * come with the structure ({@code element size by f10: 0=4, 4=1, 8=2}). The comments of a structure
  * built in an earlier analysis are used as they are. Stray instructions in the way, of no
  * function and with nothing flowing to them, are data that was disassembled, and where a
- * count field gives the length, so are the strings the string analysis made of the values.
+ * count field gives the length, so are the strings the string analysis made of the values,
+ * the words in the array or in other arrays of values that happen to be addresses, and the
+ * arrays of integers that code reading a region word by word made over the array, which are
+ * carved around it.
  */
 final class E200FieldArrays {
 
@@ -176,6 +181,7 @@ final class E200FieldArrays {
 		private final Program program;
 		private final Structure structure;
 		private final DataTypeComponent component;
+		private final Boundaries boundaries;
 		/** The element type, or null when the code chooses it at run time */
 		private final DataType element;
 		/** The types the code casts the pointer to, when it chooses */
@@ -195,6 +201,7 @@ final class E200FieldArrays {
 			this.program = program;
 			this.structure = structure;
 			this.component = component;
+			this.boundaries = boundaries;
 			DataType target = pointer.getDataType();
 			// undefined1, undefined2 and undefined4 have a size, if no type
 			boolean open = target == null || target instanceof VoidDataType ||
@@ -266,19 +273,25 @@ final class E200FieldArrays {
 			}
 		}
 
-		/** Infers the count field and the selector field from the instances (see the class) */
+		/**
+		 * Infers the count field and the selector field from the instances (see the class).
+		 * The count the code shows stands unless the instances contradict it: another
+		 * candidate fills the gaps of more of them exactly, enough of them to infer from.
+		 */
 		void infer() {
-			if (count == null) {
-				Map<Count, Integer> votes = new HashMap<>();
-				for (Instance i : instances) {
-					for (Count c : candidates()) {
-						long n = c.of(i.data());
-						if (n > 0 && fitsExactly(n, i.gap())) {
-							votes.merge(c, 1, Integer::sum);
-						}
+			Map<Count, Integer> countVotes = new HashMap<>();
+			for (Instance i : instances) {
+				for (Count c : candidates()) {
+					long n = c.of(i.data());
+					if (n > 0 && fitsExactly(n, i.gap())) {
+						countVotes.merge(c, 1, Integer::sum);
 					}
 				}
-				count = best(votes, instances.size());
+			}
+			Count best = best(countVotes, instances.size());
+			if (count == null ||
+				best != null && countVotes.get(best) > countVotes.getOrDefault(count, 0)) {
+				count = best;
 			}
 			if (element == null && sizes.size() > 1) {
 				// the instances where one size fits say what the selector's values mean
@@ -411,6 +424,10 @@ final class E200FieldArrays {
 		/** Records the count and selector fields in the field's comment */
 		void describe() {
 			String comment = component.getComment() == null ? "" : component.getComment();
+			Matcher counted = ELEMENTS.matcher(comment);
+			if (count != null && counted.find() && !counted.group().equals(count.describe())) {
+				comment = comment.replace(counted.group(), count.describe()); // the instances
+			}
 			List<String> parts = new ArrayList<>();
 			if (!comment.isEmpty()) {
 				parts.add(comment);
@@ -438,8 +455,8 @@ final class E200FieldArrays {
 					continue;
 				}
 				long n = count != null ? count.of(i.data()) : i.gap() / size;
-				if (n <= 0 || n * size > MAX_BYTES || n * size > i.limit() ||
-					count == null && (i.gap() % size != 0 || n < 2)) {
+				if (n <= 0 || n * size > MAX_BYTES ||
+					count == null && (n * size > i.limit() || i.gap() % size != 0 || n < 2)) {
 					continue;
 				}
 				DataType type = elementType(size);
@@ -453,13 +470,22 @@ final class E200FieldArrays {
 				catch (AddressOverflowException e) {
 					continue;
 				}
-				if (!i.block().contains(end) || !free(i.target(), end, type, (int) n)) {
+				if (!i.block().contains(end) ||
+					n * size > i.limit() && !boundaries.passable(i.target(), end, i.block())) {
+					continue;
+				}
+				List<Data> carved = free(i.target(), end, type, (int) n);
+				if (carved == null) {
 					continue;
 				}
 				try {
+					List<Remainder> remainders = remainders(carved, i.target(), end);
 					listing.clearCodeUnits(i.target(), end, false);
 					Data array = listing.createData(i.target(),
 						new ArrayDataType(type, (int) n, size, program.getDataTypeManager()));
+					for (Remainder r : remainders) {
+						r.create(listing, program.getDataTypeManager());
+					}
 					E200Data.targets(program, array, 0);
 					created++;
 				}
@@ -516,40 +542,93 @@ final class E200FieldArrays {
 		 * Whether an array of {@code n} elements of {@code type} may be created in a range,
 		 * and is not there already: nothing is there but undefined bytes, single values,
 		 * elements of the type (which pointers made at the elements), stray instructions, and,
-		 * where a count field gives the length, strings (cleared with the range, the one the
-		 * range starts in and the ends past it included)
+		 * where a count field gives the length, strings and arrays of integers (code reading
+		 * a region word by word made them, and the parts of them carved around other arrays;
+		 * they are carved around this one). Returns the arrays to carve, or null if the
+		 * range is not free.
 		 */
-		private boolean free(Address start, Address end, DataType type, int n) {
+		private List<Data> free(Address start, Address end, DataType type, int n) {
 			Listing listing = program.getListing();
 			boolean counted = count != null;
+			List<Data> carved = new ArrayList<>();
 			Data at = listing.getDataContaining(start);
-			if (at != null && !at.getAddress().equals(start) && !(counted && string(at))) {
-				return false;
+			if (at != null && !at.getAddress().equals(start)) {
+				if (!counted || !(string(at) || integerArray(at))) {
+					return null;
+				}
+				carved.add(at);
 			}
 			if (at != null && at.getDataType() instanceof Array a && a.getNumElements() == n &&
 				a.getDataType().isEquivalent(type)) {
-				return false; // there already
+				return null; // there already
 			}
 			AddressSet range = new AddressSet(start, end);
 			if (!E200Data.strayCode(program, range)) {
-				return false;
+				return null;
 			}
 			for (Data d : listing.getDefinedData(range, true)) {
-				if (counted && string(d)) {
+				boolean past = d.getMaxAddress().compareTo(end) > 0;
+				if (counted && (string(d) || integerArray(d))) {
+					carved.add(d);
 					continue;
 				}
 				boolean element = d.getDataType().isEquivalent(type) &&
 					d.getAddress().subtract(start) % type.getLength() == 0;
-				if (d.getMaxAddress().compareTo(end) > 0 ||
-					!element && !E200Types.primitive(d.getDataType())) {
-					return false;
+				if (past || !element && !E200Types.primitive(d.getDataType())) {
+					return null;
 				}
 			}
-			return true;
+			return carved;
 		}
 
 		private static boolean string(Data d) {
 			return d.getDataType() instanceof AbstractStringDataType;
+		}
+
+		/** Whether data is an array of integers or of undefined values */
+		private static boolean integerArray(Data d) {
+			return d.getDataType() instanceof Array a &&
+				(E200Types.integer(a.getDataType()) || Undefined.isUndefined(a.getDataType()));
+		}
+
+		/**
+		 * The parts of the carved arrays before and after the range, as arrays of their
+		 * element type again (whole elements; the rest stays undefined)
+		 */
+		private static List<Remainder> remainders(List<Data> carved, Address start,
+				Address end) {
+			List<Remainder> remainders = new ArrayList<>();
+			for (Data d : carved) {
+				if (!(d.getDataType() instanceof Array a)) {
+					continue; // a string: cleared
+				}
+				DataType element = a.getDataType();
+				if (d.getAddress().compareTo(start) < 0) {
+					long bytes = start.subtract(d.getAddress());
+					remainders.add(new Remainder(d.getAddress(), element, (int) (bytes / element.getLength())));
+				}
+				if (d.getMaxAddress().compareTo(end) > 0) {
+					long bytes = d.getMaxAddress().subtract(end);
+					remainders.add(new Remainder(end.next(), element, (int) (bytes / element.getLength())));
+				}
+			}
+			return remainders;
+		}
+	}
+
+	/** An array to create again: a part of a carved array */
+	private record Remainder(Address start, DataType element, int count) {
+		void create(Listing listing, DataTypeManager manager) {
+			if (count < 1 || start == null) {
+				return;
+			}
+			try {
+				listing.createData(start,
+					new ArrayDataType(element, count, element.getLength(), manager));
+			}
+			catch (CodeUnitInsertionException e) {
+				// the part stays undefined
+			}
 		}
 	}
 
@@ -561,13 +640,40 @@ final class E200FieldArrays {
 		private final Program program;
 		private final Listing listing;
 		private final ReferenceManager references;
-		private final TreeSet<Address> pointers;
+		/** The pointer targets, and the words that point to each */
+		private final TreeMap<Address, List<Address>> pointers;
 
 		Boundaries(Program program) {
 			this.program = program;
 			this.listing = program.getListing();
 			this.references = program.getReferenceManager();
-			this.pointers = new TreeSet<>(E200Data.pointerTargets(program));
+			this.pointers = new TreeMap<>(E200Data.pointerSources(program));
+		}
+
+		/**
+		 * Whether an array a count field gives the length of may reach {@code end} past the
+		 * limit: no code that is not stray lies in the range, and every pointer target in it
+		 * is only pointed to by words in the array itself or in data that holds no pointers
+		 * (values that happen to be addresses)
+		 */
+		boolean passable(Address start, Address end, MemoryBlock block) {
+			if (codeAfter(start, end.next(), block) != null) {
+				return false;
+			}
+			for (List<Address> sources : pointers.subMap(start, false, end, true).values()) {
+				for (Address source : sources) {
+					if (source.compareTo(start) >= 0 && source.compareTo(end) <= 0) {
+						continue; // in the array
+					}
+					Data d = listing.getDataContaining(source);
+					Data value = d == null ? null
+							: d.getPrimitiveAt((int) source.subtract(d.getAddress()));
+					if (value == null || value.getDataType() instanceof Pointer) {
+						return false;
+					}
+				}
+			}
+			return true;
 		}
 
 		/**
@@ -576,7 +682,7 @@ final class E200FieldArrays {
 		 * data that is no single value)
 		 */
 		long[] bounds(Address address, MemoryBlock block) {
-			Address limit = pointers.higher(address);
+			Address limit = pointers.higherKey(address);
 			Address code = codeAfter(address, limit, block);
 			if (code != null) {
 				limit = code;

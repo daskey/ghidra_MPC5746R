@@ -153,6 +153,14 @@ final class E200Tables {
 					type = cast;
 				}
 			}
+			if (opcode == PcodeOp.LOAD && size == 4 && !E200Types.informative(type)) {
+				// a pointer the code reads through: what it reads, as the records of a table
+				// point to single calibration values
+				DataType pointee = E200Code.pointee(value);
+				if (pointee != null) {
+					type = new PointerDataType(pointee, 4, program.getDataTypeManager());
+				}
+			}
 			accesses.add(main == null ? new Access(address, size, type, 0, 0, 0)
 					: new Access(address, size, type, main.scale(),
 						inner == main.scale() ? 0 : inner, bound(main.index())));

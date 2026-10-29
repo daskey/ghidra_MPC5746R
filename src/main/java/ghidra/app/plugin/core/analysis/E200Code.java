@@ -18,8 +18,7 @@ package ghidra.app.plugin.core.analysis;
 import java.util.*;
 
 import ghidra.program.model.address.*;
-import ghidra.program.model.data.DataType;
-import ghidra.program.model.data.Pointer;
+import ghidra.program.model.data.*;
 import ghidra.program.model.lang.Register;
 import ghidra.program.model.listing.*;
 import ghidra.program.model.mem.Memory;
@@ -319,6 +318,107 @@ final class E200Code {
 				return null;
 			}
 		}
+	}
+
+	/**
+	 * The loads that a value derives from through arithmetic, copies, casts, extensions and
+	 * merges, as the index of an array access derives from the count field of a descriptor
+	 * ({@code p->x[p->n - 1]}), with whether arithmetic lies between (a value that is the
+	 * index as it is, {@code p->x[p->i]}, is an index, not a count); at most {@code limit}
+	 * ops are followed
+	 */
+	static Map<PcodeOp, Boolean> loadsBehind(Varnode value, int limit) {
+		Map<PcodeOp, Boolean> loads = new LinkedHashMap<>();
+		Map<Varnode, Boolean> seen = new HashMap<>();
+		Deque<Map.Entry<Varnode, Boolean>> todo = new ArrayDeque<>();
+		todo.add(Map.entry(value, false));
+		while (!todo.isEmpty() && seen.size() < limit) {
+			Map.Entry<Varnode, Boolean> e = todo.pop();
+			Varnode v = e.getKey();
+			boolean arithmetic = e.getValue();
+			if (v == null || v.isConstant() ||
+				seen.containsKey(v) && (seen.get(v) || !arithmetic)) {
+				continue;
+			}
+			seen.put(v, arithmetic);
+			PcodeOp def = v.getDef();
+			if (def == null) {
+				continue;
+			}
+			switch (def.getOpcode()) {
+				case PcodeOp.LOAD -> loads.merge(def, arithmetic, Boolean::logicalOr);
+				case PcodeOp.COPY, PcodeOp.CAST, PcodeOp.INT_SEXT, PcodeOp.INT_ZEXT,
+						PcodeOp.MULTIEQUAL, PcodeOp.SUBPIECE -> {
+					for (int i = 0; i < def.getNumInputs(); i++) {
+						todo.add(Map.entry(def.getInput(i), arithmetic));
+					}
+				}
+				case PcodeOp.INT_NEGATE, PcodeOp.INT_2COMP, PcodeOp.INT_ADD, PcodeOp.INT_SUB,
+						PcodeOp.INT_MULT, PcodeOp.INT_LEFT, PcodeOp.INT_RIGHT, PcodeOp.INT_SRIGHT,
+						PcodeOp.INT_AND, PcodeOp.INT_OR, PcodeOp.INT_XOR, PcodeOp.PTRADD,
+						PcodeOp.PTRSUB -> {
+					for (int i = 0; i < def.getNumInputs(); i++) {
+						todo.add(Map.entry(def.getInput(i), true));
+					}
+				}
+				default -> {
+					// a call's result, a comparison: not an index of the structure's fields
+				}
+			}
+		}
+		return loads;
+	}
+
+	/**
+	 * What a loaded value points to, from the loads and stores through it (through copies
+	 * and casts): the type the accesses agree on; null if the value is not dereferenced, the
+	 * sizes differ or no access has a type (a pointer to an undefined value would keep the
+	 * data at the targets from the type a later step gives it)
+	 */
+	static DataType pointee(Varnode value) {
+		int size = 0;
+		List<DataType> types = new ArrayList<>();
+		Deque<Varnode> todo = new ArrayDeque<>();
+		Set<Varnode> seen = new HashSet<>();
+		todo.add(value);
+		while (!todo.isEmpty() && seen.size() < 6) {
+			Varnode v = todo.pop();
+			if (v == null || !seen.add(v)) {
+				continue;
+			}
+			Iterator<PcodeOp> uses = v.getDescendants();
+			while (uses.hasNext()) {
+				PcodeOp op = uses.next();
+				switch (op.getOpcode()) {
+					case PcodeOp.COPY, PcodeOp.CAST -> todo.add(op.getOutput());
+					case PcodeOp.LOAD, PcodeOp.STORE -> {
+						if (op.getInput(1) != v) {
+							continue;
+						}
+						Varnode accessed = op.getOpcode() == PcodeOp.LOAD ? op.getOutput()
+								: op.getInput(2);
+						if (accessed == null || size != 0 && accessed.getSize() != size) {
+							return null;
+						}
+						size = accessed.getSize();
+						DataType t = accessed.getHigh() == null ? null
+								: accessed.getHigh().getDataType();
+						if (E200Types.informative(t) && t.getLength() == size &&
+							!(t instanceof Pointer)) {
+							types.add(t);
+						}
+					}
+					default -> {
+						// not a use as the address
+					}
+				}
+			}
+		}
+		if (size == 0 || types.isEmpty()) {
+			return null;
+		}
+		DataType type = E200Types.chooseType(types, false, true);
+		return type != null && type.getLength() == size ? type : null;
 	}
 
 	/** The LOAD a value comes from, through copies, casts and extensions; null if none */
