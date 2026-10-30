@@ -17,6 +17,7 @@ package ghidra.app.plugin.core.analysis;
 
 import java.util.*;
 
+import ghidra.app.cmd.disassemble.DisassembleCommand;
 import ghidra.app.util.PseudoDisassembler;
 import ghidra.app.util.PseudoInstruction;
 import ghidra.program.model.address.*;
@@ -43,14 +44,21 @@ import ghidra.util.task.TaskMonitor;
  * <li>decode completely and end in returns or branches on every path,</li>
  * <li>stay inside the gap, except for calls and branches to existing instructions,</li>
  * <li>agree with the instructions already in the gap,</li>
- * <li>have at least {@link #MIN_INSTRUCTIONS} instructions, and</li>
+ * <li>have at least {@link #MIN_INSTRUCTIONS} instructions, or are a lone {@code se_blr}, an
+ * empty function between the others, and</li>
  * <li>contain no {@code se_illegal}, and none of the unusual instructions below unless the
  * program's code already uses that instruction: LSP and SPE vector instructions, system
  * and interrupt returns, TLB, MPU, DCR, cache locking, decorated storage and string
  * instructions.</li>
  * </ul>
  * Data rarely decodes that way, so tables, strings and constants between functions stay
- * data. Each subroutine becomes a function with an analysis bookmark.
+ * data. Each subroutine becomes a function with an analysis bookmark. The padding a gap
+ * begins with, {@code se_nop} or {@code se_or rX,rX}, is disassembled.
+ * <p>
+ * Two kinds of tables lead to code too: tables of handlers, pointers in a column of function
+ * entry points (see {@link #findPointedFunctions}), and branch tables, runs of {@code e_b}
+ * right after code that does not fall through, which a computed jump selects an entry of
+ * (see {@link #findBranchTables}).
  */
 final class E200CodeGaps {
 
@@ -60,6 +68,7 @@ final class E200CodeGaps {
 	/** An unusual instruction is accepted when the program's code already uses it this often. */
 	private static final int COMMON_USES = 5;
 	private static final int SE_NOP = 0x4400;
+	private static final int SE_BLR = 0x0004;
 	private static final int ERASED = 0xffff;
 
 	/** Instructions typical of data decoded as VLE, or of code that is never a plain leaf. */
@@ -97,8 +106,10 @@ final class E200CodeGaps {
 		Map<String, Integer> uses = mnemonicUses(program, monitor);
 		PseudoDisassembler disassembler = new PseudoDisassembler(program);
 		AutoAnalysisManager manager = AutoAnalysisManager.getAnalysisManager(program);
+		int padding = 0;
 		for (Address gap : gaps) {
 			monitor.checkCancelled();
+			padding += disassemblePadding(program, gap, executable);
 			List<Address> entries = findSubroutines(program, disassembler, uses, gap, executable);
 			for (Address entry : entries) {
 				manager.disassemble(entry);
@@ -113,7 +124,58 @@ final class E200CodeGaps {
 			Msg.info(E200Analyzer.class,
 				"Found " + found.size() + " functions in gaps between functions");
 		}
+		if (padding > 0) {
+			Msg.info(E200Analyzer.class,
+				"Disassembled " + padding + " no-op instructions of padding after functions");
+		}
 		return found;
+	}
+
+	/**
+	 * Disassembles the {@code se_nop} and {@code se_or rX,rX} that the gap starting at
+	 * {@code start}, after a return or unconditional branch, begins with, where a function or
+	 * data follows them: the padding compilers put between functions, which nothing executes.
+	 * Returns how many.
+	 */
+	private static int disassemblePadding(Program program, Address start,
+			AddressSetView executable) {
+		Listing listing = program.getListing();
+		if ((start.getOffset() & 1) != 0 || !endsFlow(listing, start)) {
+			return 0;
+		}
+		AddressRange gap = freeRange(listing, start, executable);
+		if (gap == null) {
+			return 0;
+		}
+		Memory memory = program.getMemory();
+		Address end = null;
+		int count = 0;
+		for (Address a = start; a != null && a.compareTo(gap.getMaxAddress()) < 0;
+				a = next(a, 2, gap.getMaxAddress())) {
+			try {
+				int halfword = memory.getShort(a) & 0xffff;
+				// se_or rX,rX does nothing, as se_nop (se_or r0,r0): the fill some compilers use
+				if ((halfword & 0xff00) != SE_NOP || (halfword >> 4 & 0xf) != (halfword & 0xf) ||
+					!listing.isUndefined(a, a.add(1))) {
+					break;
+				}
+			}
+			catch (MemoryAccessException | AddressOutOfBoundsException e) {
+				break;
+			}
+			end = a.add(1);
+			count++;
+		}
+		// only once what follows is settled, a function or data: code that a later function
+		// takes in may still be found after the padding
+		Address after = end == null ? null : end.next();
+		if (after == null || program.getFunctionManager().getFunctionAt(after) == null &&
+			listing.getDefinedDataAt(after) == null) {
+			return 0;
+		}
+		AddressSet nops = new AddressSet(start, end);
+		new DisassembleCommand(nops, nops, true).applyTo(program);
+		return count;
 	}
 
 	private static Map<String, Integer> mnemonicUses(Program program, TaskMonitor monitor)
@@ -165,8 +227,8 @@ final class E200CodeGaps {
 			}
 			// uncovered bytes that are not padding: the next subroutine must start here
 			Map<Address, Integer> body =
-				followSubroutine(listing, disassembler, uses, a, gap, code.keySet());
-			if (body == null) {
+				followSubroutine(listing, disassembler, uses, a, gap, code.keySet(), 1, false);
+			if (body == null || body.size() < MIN_INSTRUCTIONS && !emptyFunction(memory, a)) {
 				return List.of();
 			}
 			code.putAll(body);
@@ -177,6 +239,16 @@ final class E200CodeGaps {
 			return List.of();
 		}
 		return entries;
+	}
+
+	/** Whether the instruction at {@code address} is a lone {@code se_blr}: an empty function */
+	private static boolean emptyFunction(Memory memory, Address address) {
+		try {
+			return (memory.getShort(address) & 0xffff) == SE_BLR;
+		}
+		catch (MemoryAccessException e) {
+			return false;
+		}
 	}
 
 	/** Whether the code unit before {@code address} is a return or unconditional branch. */
@@ -335,10 +407,10 @@ final class E200CodeGaps {
 	 * within {@link #NEAR} bytes of the code or inside it that is no function, instruction or
 	 * candidate says the bytes are data: the values of a table that a table of structures
 	 * points to one by one decode as code too; so does code that writes a register compiled
-	 * code keeps without a stack frame. An empty handler, one return, matches no
-	 * start pattern and the gap rule above asks for more instructions; the table says it is a
-	 * function. Returns how many were created; {@code scheduled} are the entry points of the
-	 * functions the gap rule has just scheduled, not created yet, which need no table.
+	 * code keeps without a stack frame. An empty handler, one return, matches no start
+	 * pattern, and the gap rule above takes it only in a gap that is all code; the table says
+	 * it is a function. Returns how many were created; {@code scheduled} are the entry points
+	 * of the functions the gap rule has just scheduled, not created yet, which need no table.
 	 */
 	static int findPointedFunctions(Program program, Collection<Address> scheduled,
 			TaskMonitor monitor) throws CancelledException {
@@ -431,6 +503,81 @@ final class E200CodeGaps {
 			Msg.info(E200Analyzer.class, "Found " + found + " functions that tables point to");
 		}
 		return found;
+	}
+
+	/** Fewest branches taken as a branch table */
+	private static final int MIN_BRANCHES = 2;
+
+	/**
+	 * Disassembles the branch tables that computed jumps select an entry of, and makes
+	 * functions of the code their entries branch to: a run of at least {@link #MIN_BRANCHES}
+	 * {@code e_b} instructions in undefined bytes directly after an instruction that does not
+	 * fall through, as the interrupt dispatch of an operating system adds four times a number
+	 * to the address of the table and returns to it ({@code se_mtlr}, {@code se_blr}). The
+	 * targets must lie in executable memory outside the table and decode as code; those in a
+	 * function stay in it. Returns how many functions were created.
+	 */
+	static int findBranchTables(Program program, TaskMonitor monitor) throws CancelledException {
+		Listing listing = program.getListing();
+		Memory memory = program.getMemory();
+		FunctionManager functions = program.getFunctionManager();
+		AddressSetView executable = E200Code.executableMemory(program);
+		PseudoDisassembler disassembler = new PseudoDisassembler(program);
+		AutoAnalysisManager manager = AutoAnalysisManager.getAnalysisManager(program);
+		Set<Address> created = new HashSet<>();
+		for (Instruction instruction : listing.getInstructions(executable, true)) {
+			monitor.checkCancelled();
+			Address next = instruction.getMaxAddress().next();
+			if (instruction.hasFallthrough() || next == null ||
+				listing.getUndefinedDataAt(next) == null) {
+				continue;
+			}
+			List<Address> targets = new ArrayList<>();
+			Address end = next;
+			for (Address a = next; a != null; a = a.next()) {
+				Address last;
+				try {
+					last = a.addNoWrap(3);
+				}
+				catch (AddressOverflowException e) {
+					break;
+				}
+				Address target = executable.contains(a, last) && listing.isUndefined(a, last)
+						? E200EntryPoints.branchTarget(memory, a, 0)
+						: null;
+				if (target == null || !executable.contains(target)) {
+					break;
+				}
+				targets.add(target);
+				end = last;
+				a = last;
+			}
+			if (targets.size() < MIN_BRANCHES) {
+				continue;
+			}
+			boolean code = true;
+			for (Address target : targets) {
+				code &= (target.compareTo(next) < 0 || target.compareTo(end) > 0) &&
+					disassembler.isValidCode(target);
+			}
+			if (!code) {
+				continue;
+			}
+			manager.disassemble(new AddressSet(next, end));
+			for (Address target : targets) {
+				if (functions.getFunctionContaining(target) == null && created.add(target)) {
+					manager.createFunction(target, false);
+					program.getBookmarkManager()
+							.setBookmark(target, BookmarkType.ANALYSIS, BOOKMARK_CATEGORY,
+								"Function that a branch table after a computed jump leads to");
+				}
+			}
+		}
+		if (!created.isEmpty()) {
+			Msg.info(E200Analyzer.class,
+				"Found " + created.size() + " functions that branch tables lead to");
+		}
+		return created.size();
 	}
 
 	private static long word(byte[] bytes, int i) {
