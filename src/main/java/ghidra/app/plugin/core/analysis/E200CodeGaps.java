@@ -20,6 +20,7 @@ import java.util.*;
 import ghidra.app.util.PseudoDisassembler;
 import ghidra.app.util.PseudoInstruction;
 import ghidra.program.model.address.*;
+import ghidra.program.model.lang.Register;
 import ghidra.program.model.listing.*;
 import ghidra.program.model.mem.*;
 import ghidra.program.model.symbol.FlowType;
@@ -246,16 +247,24 @@ final class E200CodeGaps {
 			PseudoDisassembler disassembler, Map<String, Integer> uses, Address entry,
 			AddressRange gap, Set<Address> covered) {
 		return followSubroutine(listing, disassembler, uses, entry, gap, covered,
-			MIN_INSTRUCTIONS);
+			MIN_INSTRUCTIONS, false);
 	}
 
+	/**
+	 * As above, with at least {@code minInstructions}; where the subroutine must be
+	 * {@code compiled} code, also null if it writes a register that the EABI has functions
+	 * keep (r2, r13, r14-r31) without a stack frame to save it in. Hand-written routines
+	 * after the code of a function, as self-tests of the core, use those registers freely.
+	 */
 	private static Map<Address, Integer> followSubroutine(Listing listing,
 			PseudoDisassembler disassembler, Map<String, Integer> uses, Address entry,
-			AddressRange gap, Set<Address> covered, int minInstructions) {
+			AddressRange gap, Set<Address> covered, int minInstructions, boolean compiled) {
 		Map<Address, Integer> body = new HashMap<>();
 		Deque<Address> todo = new ArrayDeque<>();
 		todo.push(entry);
 		boolean ends = false;
+		boolean frame = false; // writes the stack pointer: has a frame to save registers in
+		boolean keeps = false; // writes a register that a function must keep
 		while (!todo.isEmpty()) {
 			Address a = todo.pop();
 			if (body.containsKey(a) || covered.contains(a)) {
@@ -276,6 +285,13 @@ final class E200CodeGaps {
 				!agrees(listing, a, instruction.getLength())) {
 				return null;
 			}
+			for (Object result : instruction.getResultObjects()) {
+				if (result instanceof Register r && r.getName().matches("r[0-9]+")) {
+					int n = Integer.parseInt(r.getName().substring(1));
+					frame |= n == 1;
+					keeps |= n == 2 || n >= 13;
+				}
+			}
 			body.put(a, instruction.getLength());
 			FlowType flow = instruction.getFlowType();
 			for (Address target : instruction.getFlows()) {
@@ -295,17 +311,34 @@ final class E200CodeGaps {
 				ends = true;
 			}
 		}
-		return ends && body.size() >= minInstructions ? body : null;
+		// compiled code keeps r2, r13 and r14-r31 (the EABI's non-volatile registers): a
+		// subroutine that writes one without a stack frame to save it in is data
+		return ends && body.size() >= minInstructions && !(compiled && keeps && !frame) ? body
+				: null;
 	}
+
+	/** How far around a pointer the words of its table are looked at, in bytes */
+	private static final int REACH = 32;
+	/** How close to a handler a pointer target that is no function may lie, in bytes */
+	private static final int NEAR = 8;
+	private static final int CHUNK = 0x10000;
 
 	/**
 	 * Creates functions at the code that pointers in tables of handlers point to: an aligned
 	 * word of initialized memory whose value is an even address in executable memory outside
-	 * every function, where the bytes decode as a complete subroutine, when the word before or
-	 * after it points to a function. An empty handler, one return, matches no start pattern
-	 * and the gap rule above asks for more instructions; the table says it is a function.
-	 * Returns how many were created; {@code scheduled} are the entry points of the functions
-	 * the gap rule has just scheduled, not created yet, which need no table.
+	 * every function, where the bytes decode as a complete subroutine, when the word is in a
+	 * column of function entry points, at one stride (4 to {@link #REACH} bytes, as a field
+	 * of a table of structures is; see {@link #column}): between two entries, at the end of a
+	 * column of two, or, in an array of pointers, next to one entry at an end of the array,
+	 * for a subroutine of more than one instruction or one that directly follows the return
+	 * or branch that ends a function, as compiled code places functions. A pointer target
+	 * within {@link #NEAR} bytes of the code or inside it that is no function, instruction or
+	 * candidate says the bytes are data: the values of a table that a table of structures
+	 * points to one by one decode as code too; so does code that writes a register compiled
+	 * code keeps without a stack frame. An empty handler, one return, matches no
+	 * start pattern and the gap rule above asks for more instructions; the table says it is a
+	 * function. Returns how many were created; {@code scheduled} are the entry points of the
+	 * functions the gap rule has just scheduled, not created yet, which need no table.
 	 */
 	static int findPointedFunctions(Program program, Collection<Address> scheduled,
 			TaskMonitor monitor) throws CancelledException {
@@ -314,46 +347,54 @@ final class E200CodeGaps {
 		FunctionManager functions = program.getFunctionManager();
 		AddressSetView executable = E200Code.executableMemory(program);
 		AddressSpace space = program.getAddressFactory().getDefaultAddressSpace();
-		Set<Address> candidates = new TreeSet<>();
-		byte[] bytes = new byte[0x10000];
-		for (MemoryBlock block : memory.getBlocks()) {
-			if (!block.isInitialized() || block.isVolatile() ||
-				!block.getStart().getAddressSpace().equals(space)) {
-				continue;
-			}
-			Address start = block.getStart();
-			long[] words = new long[3]; // previous, this, next
-			for (long offset = 0; offset + 3 < block.getSize(); offset += bytes.length) {
-				monitor.checkCancelled();
-				int length = (int) Math.min(bytes.length, block.getSize() - offset);
-				try {
-					memory.getBytes(start.add(offset), bytes, 0, length);
+		// the free code that words point to, by the words; then the candidates with the
+		// strength of their column: 2 for a column of function entry points, 1 for an end
+		Map<Address, List<Address>> words = new TreeMap<>();
+		Map<Address, Integer> candidates = new TreeMap<>();
+		byte[] bytes = new byte[CHUNK + 2 * REACH];
+		for (int pass = 0; pass < 2; pass++) {
+			for (MemoryBlock block : memory.getBlocks()) {
+				if (!block.isInitialized() || block.isVolatile() ||
+					!block.getStart().getAddressSpace().equals(space)) {
+					continue;
 				}
-				catch (MemoryAccessException | AddressOutOfBoundsException e) {
-					break;
-				}
-				for (int i = 0; i + 3 < length; i += 4) {
-					long word = (bytes[i] & 0xffL) << 24 | (bytes[i + 1] & 0xffL) << 16 |
-						(bytes[i + 2] & 0xffL) << 8 | bytes[i + 3] & 0xffL;
-					words[0] = words[1];
-					words[1] = words[2];
-					words[2] = word;
-					// the word two back is now between its neighbours
-					if (offset + i < 8) {
-						continue;
+				Address start = block.getStart();
+				long size = block.getSize();
+				for (long offset = 0; offset + 3 < size; offset += CHUNK) {
+					monitor.checkCancelled();
+					long from = Math.max(0, offset - REACH);
+					int length = (int) Math.min(bytes.length, size - from);
+					try {
+						memory.getBytes(start.add(from), bytes, 0, length);
 					}
-					long value = words[1];
-					if ((value & 1) != 0 || value == 0 ||
-						!executable.contains(space.getAddress(value))) {
-						continue;
+					catch (MemoryAccessException | AddressOutOfBoundsException e) {
+						break;
 					}
-					Address target = space.getAddress(value);
-					if (functions.getFunctionContaining(target) != null ||
-						scheduled.contains(target) || !isFree(listing, target)) {
-						continue;
-					}
-					if (entry(functions, space, words[0]) || entry(functions, space, words[2])) {
-						candidates.add(target);
+					int first = (int) (offset - from);
+					int last = Math.min(length, first + CHUNK);
+					for (int i = first; i + 3 < last; i += 4) {
+						long value = word(bytes, i);
+						if ((value & 1) != 0 || value == 0 ||
+							!executable.contains(space.getAddress(value))) {
+							continue;
+						}
+						Address target = space.getAddress(value);
+						if (pass == 0) {
+							if (functions.getFunctionContaining(target) == null &&
+								!scheduled.contains(target) && isFree(listing, target)) {
+								words.computeIfAbsent(target, t -> new ArrayList<>(1))
+										.add(start.add(from + i));
+							}
+							continue;
+						}
+						if (!words.containsKey(target)) {
+							continue;
+						}
+						int column =
+							column(functions, memory, space, words.keySet(), bytes, i, length);
+						if (column > 0) {
+							candidates.merge(target, column, Math::max);
+						}
 					}
 				}
 			}
@@ -364,12 +405,19 @@ final class E200CodeGaps {
 		Map<String, Integer> uses = mnemonicUses(program, monitor);
 		PseudoDisassembler disassembler = new PseudoDisassembler(program);
 		AutoAnalysisManager manager = AutoAnalysisManager.getAnalysisManager(program);
+		TreeSet<Address> pointed = new TreeSet<>(E200Data.pointerTargets(program));
 		int found = 0;
-		for (Address entry : candidates) {
+		for (Map.Entry<Address, Integer> candidate : candidates.entrySet()) {
 			monitor.checkCancelled();
+			Address entry = candidate.getKey();
 			AddressRange gap = freeRange(listing, entry, executable);
-			if (gap == null || followSubroutine(listing, disassembler, uses, entry, gap,
-				Set.of(), 1) == null) {
+			Map<Address, Integer> body = gap == null ? null
+					: followSubroutine(listing, disassembler, uses, entry, gap, Set.of(), 1,
+						true);
+			if (body == null ||
+				body.size() < MIN_INSTRUCTIONS && candidate.getValue() < 2 &&
+					!afterFunction(listing, entry) ||
+				dataNear(listing, functions, pointed, candidates.keySet(), entry, body)) {
 				continue;
 			}
 			manager.disassemble(entry);
@@ -383,6 +431,162 @@ final class E200CodeGaps {
 			Msg.info(E200Analyzer.class, "Found " + found + " functions that tables point to");
 		}
 		return found;
+	}
+
+	private static long word(byte[] bytes, int i) {
+		return (bytes[i] & 0xffL) << 24 | (bytes[i + 1] & 0xffL) << 16 |
+			(bytes[i + 2] & 0xffL) << 8 | bytes[i + 3] & 0xffL;
+	}
+
+	/**
+	 * How much the word at {@code i} of the buffer is in a column of function entry points,
+	 * at the best stride: 2 where the words one stride before and after it both point to
+	 * functions, or a word up to two strides before it and one up to two strides after it do
+	 * and none of the four points elsewhere, or it ends a column of two (the two words before
+	 * or after it at the stride point to functions, the word on the other side is no address,
+	 * and the words between are not all pointers to code: a dense array of pointers is no
+	 * column of a wider stride); 1 where, in an array of pointers (a stride of 4), one
+	 * neighbour points to a function and the other is no address, at an end of the array; 0
+	 * otherwise. Words that point to the same code count as entries next to a real one, as an
+	 * array of the same default handler before the others; the other {@code candidates}, the
+	 * free code that words point to, count as neither.
+	 */
+	private static int column(FunctionManager functions, Memory memory, AddressSpace space,
+			Set<Address> candidates, byte[] bytes, int i, int length) {
+		long value = word(bytes, i);
+		int best = 0;
+		for (int stride = 4; stride <= REACH; stride += 4) {
+			// by k = -2, -1, 1, 2 strides: 1 a function entry, 2 the same code, 3 another
+			// address, 0 no address or nothing
+			int[] kinds = new int[5];
+			boolean real = false;
+			for (int k = -2; k <= 2; k++) {
+				int at = i + k * stride;
+				if (k == 0 || at < 0 || at + 3 >= length) {
+					continue;
+				}
+				long word = word(bytes, at);
+				if (entry(functions, space, word)) {
+					kinds[k + 2] = 1;
+					real = true;
+				}
+				else if (word == value) {
+					kinds[k + 2] = 2;
+				}
+				else if (address(memory, space, word) &&
+					!candidates.contains(space.getAddress(word))) {
+					kinds[k + 2] = 3;
+				}
+			}
+			if (!real) {
+				continue;
+			}
+			boolean a = kinds[1] == 1 || kinds[1] == 2;
+			boolean b = kinds[3] == 1 || kinds[3] == 2;
+			boolean entryBefore = a || kinds[0] == 1 || kinds[0] == 2;
+			boolean entryAfter = b || kinds[4] == 1 || kinds[4] == 2;
+			boolean others = kinds[0] == 3 || kinds[1] == 3 || kinds[3] == 3 || kinds[4] == 3;
+			if (a && b || entryBefore && entryAfter && !others) {
+				return 2;
+			}
+			boolean twoBefore = a && (kinds[0] == 1 || kinds[0] == 2);
+			boolean twoAfter = b && (kinds[4] == 1 || kinds[4] == 2);
+			if (twoBefore &&
+				end(functions, memory, space, candidates, bytes, i, stride, 1, length) ||
+				twoAfter &&
+					end(functions, memory, space, candidates, bytes, i, stride, -1, length)) {
+				return 2; // the end of a column of two or more
+			}
+			if (stride == 4 && (kinds[1] == 1 && kinds[3] == 0 || kinds[3] == 1 && kinds[1] == 0)) {
+				best = 1;
+			}
+		}
+		return best;
+	}
+
+	/**
+	 * Whether the column at a stride ends at the word at {@code i}: the word one stride on
+	 * the {@code side} away from the column is no address, and the words between the column's
+	 * two entries next to it are not all pointers to code, function entries or the free code
+	 * that words point to (else the pointers are a dense array, which matches any stride; the
+	 * other fields of a structure, other handlers among them, leave gaps)
+	 */
+	private static boolean end(FunctionManager functions, Memory memory, AddressSpace space,
+			Set<Address> candidates, byte[] bytes, int i, int stride, int side, int length) {
+		int beyond = i + side * stride;
+		if (beyond < 0 || beyond + 3 >= length ||
+			address(memory, space, word(bytes, beyond))) {
+			return false;
+		}
+		boolean dense = stride > 4;
+		for (int d = 4; d < stride && dense; d += 4) {
+			int at = i - side * (stride + d);
+			if (at < 0 || at + 3 >= length) {
+				dense = false;
+				break;
+			}
+			long word = word(bytes, at);
+			dense = entry(functions, space, word) || word != 0 && (word & 1) == 0 &&
+				word <= space.getMaxAddress().getOffset() &&
+				candidates.contains(space.getAddress(word));
+		}
+		return !dense;
+	}
+
+	/**
+	 * Whether the instruction that ends right before {@code entry} is the return or branch
+	 * that ends a function, after which compiled code places the next function
+	 */
+	private static boolean afterFunction(Listing listing, Address entry) {
+		Address before;
+		try {
+			before = entry.subtractNoWrap(1);
+		}
+		catch (AddressOverflowException e) {
+			return false;
+		}
+		Instruction previous = listing.getInstructionContaining(before);
+		return previous != null && previous.getMaxAddress().equals(before) &&
+			!previous.hasFallthrough() &&
+			listing.getFunctionContaining(previous.getAddress()) != null;
+	}
+
+	/** Whether a word is an even address in memory */
+	private static boolean address(Memory memory, AddressSpace space, long word) {
+		return word != 0 && word != 0xffffffffL && (word & 1) == 0 &&
+			word <= space.getMaxAddress().getOffset() && memory.contains(space.getAddress(word));
+	}
+
+	/**
+	 * Whether a pointer target that is no function, instruction or candidate lies within
+	 * {@link #NEAR} bytes of the subroutine at {@code entry} (its instructions in
+	 * {@code body}), or inside it: the bytes are the values of a table
+	 */
+	private static boolean dataNear(Listing listing, FunctionManager functions,
+			TreeSet<Address> pointed, Set<Address> candidates, Address entry,
+			Map<Address, Integer> body) {
+		Address end = entry;
+		for (Map.Entry<Address, Integer> e : body.entrySet()) {
+			Address last = e.getKey().add(e.getValue() - 1);
+			if (last.compareTo(end) > 0) {
+				end = last;
+			}
+		}
+		Address from = entry.getOffset() >= NEAR ? entry.subtract(NEAR) : entry;
+		Address to;
+		try {
+			to = end.addNoWrap(NEAR);
+		}
+		catch (AddressOverflowException e) {
+			to = end;
+		}
+		for (Address t : pointed.subSet(from, true, to, true)) {
+			if (!t.equals(entry) && functions.getFunctionAt(t) == null &&
+				listing.getInstructionAt(t) == null && !candidates.contains(t)) {
+				return true;
+			}
+		}
+		return false;
 	}
 
 	/** Whether a word is the entry point of a function */

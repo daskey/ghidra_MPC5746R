@@ -146,7 +146,8 @@ final class E200Code {
 
 	/**
 	 * The addresses a value may be (see {@link #addressOf}), through the merges of several,
-	 * as in {@code f(flag ? &a : &b)}
+	 * as in {@code f(flag ? &a : &b)}, and the copies and casts between them, as a merge of
+	 * constants copied to a variable that another merge takes
 	 */
 	static Set<Address> addressesOf(Program program, Varnode value) {
 		Set<Address> addresses = new LinkedHashSet<>();
@@ -156,10 +157,10 @@ final class E200Code {
 
 	private static void addressesOf(Program program, Varnode value, int depth,
 			Set<Address> addresses) {
-		if (value == null || depth > 4) {
+		if (value == null || depth > 6) {
 			return;
 		}
-		PcodeOp def = value.getDef();
+		PcodeOp def = unwrap(value).getDef();
 		if (def != null && def.getOpcode() == PcodeOp.MULTIEQUAL) {
 			for (int i = 0; i < def.getNumInputs(); i++) {
 				addressesOf(program, def.getInput(i), depth + 1, addresses);
@@ -287,6 +288,146 @@ final class E200Code {
 		return null;
 	}
 
+	/** A comparison of a value with a constant: whether the value equals it or differs */
+	record Comparison(Varnode value, long constant, boolean equal) {}
+
+	/** The float operations of p-code */
+	private static final Set<Integer> FLOAT_OPS = Set.of(PcodeOp.FLOAT_EQUAL,
+		PcodeOp.FLOAT_NOTEQUAL, PcodeOp.FLOAT_LESS, PcodeOp.FLOAT_LESSEQUAL, PcodeOp.FLOAT_NAN,
+		PcodeOp.FLOAT_ADD, PcodeOp.FLOAT_DIV, PcodeOp.FLOAT_MULT, PcodeOp.FLOAT_SUB,
+		PcodeOp.FLOAT_NEG, PcodeOp.FLOAT_ABS, PcodeOp.FLOAT_SQRT, PcodeOp.FLOAT_FLOAT2FLOAT,
+		PcodeOp.FLOAT_TRUNC, PcodeOp.FLOAT_CEIL, PcodeOp.FLOAT_FLOOR, PcodeOp.FLOAT_ROUND);
+
+	/**
+	 * The ops that use a value, through copies and casts, as the float operations in the
+	 * branches that use a value loaded before them; null if the value goes into a merge, as a
+	 * variable that other paths set too, whose uses lie anywhere
+	 */
+	static List<PcodeOp> consumers(Varnode value) {
+		List<PcodeOp> consumers = new ArrayList<>();
+		Deque<Varnode> todo = new ArrayDeque<>();
+		Set<Varnode> seen = new HashSet<>();
+		todo.add(value);
+		while (!todo.isEmpty()) {
+			Varnode v = todo.pop();
+			if (v == null || !seen.add(v)) {
+				continue;
+			}
+			if (seen.size() > 32) {
+				return null;
+			}
+			Iterator<PcodeOp> uses = v.getDescendants();
+			while (uses.hasNext()) {
+				PcodeOp op = uses.next();
+				switch (op.getOpcode()) {
+					case PcodeOp.COPY, PcodeOp.CAST -> todo.add(op.getOutput());
+					case PcodeOp.MULTIEQUAL, PcodeOp.INDIRECT -> {
+						return null;
+					}
+					default -> consumers.add(op);
+				}
+			}
+		}
+		return consumers;
+	}
+
+	/**
+	 * Whether a value is used, and only as a float: in float operations, or cast to a float
+	 * type, as the decompiler shows {@code (float)p[1].f4} where the field type of the next
+	 * element says pointer
+	 */
+	static boolean usedAsFloat(Varnode value) {
+		boolean used = false;
+		Deque<Varnode> todo = new ArrayDeque<>();
+		Set<Varnode> seen = new HashSet<>();
+		todo.add(value);
+		while (!todo.isEmpty()) {
+			Varnode v = todo.pop();
+			if (v == null || !seen.add(v)) {
+				continue;
+			}
+			if (seen.size() > 16) {
+				return false;
+			}
+			Iterator<PcodeOp> uses = v.getDescendants();
+			while (uses.hasNext()) {
+				PcodeOp op = uses.next();
+				if (op.getOpcode() == PcodeOp.COPY) {
+					todo.add(op.getOutput());
+					continue;
+				}
+				if (op.getOpcode() == PcodeOp.CAST) {
+					HighVariable high = op.getOutput().getHigh();
+					if (high == null || !(high.getDataType() instanceof AbstractFloatDataType)) {
+						return false;
+					}
+				}
+				else if (!FLOAT_OPS.contains(op.getOpcode())) {
+					return false;
+				}
+				used = true;
+			}
+		}
+		return used;
+	}
+
+	/**
+	 * The comparisons with constants that hold where an op is: the branches taken on the way
+	 * to its block, up the chain of blocks with one predecessor each (see {@link #guard}),
+	 * as {@code p->type != 0} and {@code p->type == 8} on the way to a load in the branch
+	 * of a switch on the type
+	 */
+	static List<Comparison> guards(PcodeOp op) {
+		List<Comparison> guards = new ArrayList<>();
+		if (!(op instanceof PcodeOpAST ast)) {
+			return guards;
+		}
+		PcodeBlock block = ast.getParent();
+		for (int depth = 0; block != null && block.getInSize() == 1 && depth < 8; depth++) {
+			PcodeBlock in = block.getIn(0);
+			PcodeOp last = in instanceof PcodeBlockBasic basic ? basic.getLastOp() : null;
+			if (last != null && last.getOpcode() == PcodeOp.CBRANCH) {
+				Comparison c = comparisonOf(last.getInput(1), in.getTrueOut() == block, 0);
+				if (c != null) {
+					guards.add(c);
+				}
+			}
+			block = in;
+		}
+		return guards;
+	}
+
+	/**
+	 * The comparison a condition is, if it {@code holds}, or its opposite if it does not;
+	 * null for other conditions
+	 */
+	private static Comparison comparisonOf(Varnode condition, boolean holds, int depth) {
+		PcodeOp def = condition == null || depth > 4 ? null : condition.getDef();
+		if (def == null) {
+			return null;
+		}
+		switch (def.getOpcode()) {
+			case PcodeOp.BOOL_NEGATE -> {
+				return comparisonOf(def.getInput(0), !holds, depth + 1);
+			}
+			case PcodeOp.INT_EQUAL, PcodeOp.INT_NOTEQUAL -> {
+				boolean equal = def.getOpcode() == PcodeOp.INT_EQUAL == holds;
+				Varnode a = def.getInput(0);
+				Varnode b = def.getInput(1);
+				if (b.isConstant() && !a.isConstant()) {
+					return new Comparison(a, b.getOffset(), equal);
+				}
+				if (a.isConstant() && !b.isConstant()) {
+					return new Comparison(b, a.getOffset(), equal);
+				}
+				return null;
+			}
+			default -> {
+				return null;
+			}
+		}
+	}
+
 	/**
 	 * The value and constant that a condition says are equal, if it {@code holds}, or that
 	 * it says differ if it does not; null for other conditions
@@ -371,9 +512,10 @@ final class E200Code {
 
 	/**
 	 * What a loaded value points to, from the loads and stores through it (through copies
-	 * and casts): the type the accesses agree on; null if the value is not dereferenced, the
-	 * sizes differ or no access has a type (a pointer to an undefined value would keep the
-	 * data at the targets from the type a later step gives it)
+	 * and casts): the type the accesses agree on, where a value read has none the type code
+	 * casts it to or copies it into ({@code (char)*p}, {@code BYTE_x = *p}); null if the value
+	 * is not dereferenced, the sizes differ or no access has a type (a pointer to an undefined
+	 * value would keep the data at the targets from the type a later step gives it)
 	 */
 	static DataType pointee(Varnode value) {
 		int size = 0;
@@ -406,6 +548,23 @@ final class E200Code {
 						if (E200Types.informative(t) && t.getLength() == size &&
 							!(t instanceof Pointer)) {
 							types.add(t);
+						}
+						else if (op.getOpcode() == PcodeOp.LOAD) {
+							// an untyped value read: what code casts it to or copies it into,
+							// as (char)*p and BYTE_x = *p
+							Iterator<PcodeOp> valueUses = accessed.getDescendants();
+							while (valueUses.hasNext()) {
+								PcodeOp u = valueUses.next();
+								HighVariable high = u.getOutput() == null ? null
+										: u.getOutput().getHigh();
+								DataType ut = high == null ? null : high.getDataType();
+								if ((u.getOpcode() == PcodeOp.CAST ||
+									u.getOpcode() == PcodeOp.COPY) &&
+									E200Types.informative(ut) && ut.getLength() == size &&
+									!(ut instanceof Pointer)) {
+									types.add(ut);
+								}
+							}
 						}
 					}
 					default -> {

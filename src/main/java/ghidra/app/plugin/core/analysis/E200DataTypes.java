@@ -226,7 +226,8 @@ final class E200DataTypes {
 			}
 			int functionPointers = E200FunctionPointers.apply(program, monitor);
 			int fieldArrays = E200FieldArrays.apply(program, monitor);
-			log(counts, functionPointers, fieldArrays);
+			int strayCode = E200Data.clearStrayCode(program, monitor);
+			log(counts, functionPointers, fieldArrays, strayCode);
 		}
 		catch (CancelledException | InterruptedException e) {
 			throw new CancelledException();
@@ -329,7 +330,12 @@ final class E200DataTypes {
 		return affected;
 	}
 
-	private static void log(Counts counts, int functionPointers, int fieldArrays) {
+	private static void log(Counts counts, int functionPointers, int fieldArrays,
+			int strayCode) {
+		if (strayCode > 0) {
+			Msg.info(E200Analyzer.class, "Cleared " + strayCode +
+				" stray instructions of no function that nothing flows to: data that was disassembled");
+		}
 		if (functionPointers > 0) {
 			Msg.info(E200Analyzer.class, "Typed " + functionPointers +
 				" pointers, array elements and structure fields in flash that point to functions");

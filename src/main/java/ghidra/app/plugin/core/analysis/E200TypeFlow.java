@@ -112,9 +112,17 @@ final class E200TypeFlow {
 	}
 
 	record Global(Address address) implements Slot {
+		/**
+		 * The type of the data, or of its elements for an array of undefined elements that
+		 * code indexes, which the uses of the first element type (see {@link Places#set})
+		 */
 		@Override
 		public DataType current(Program program) {
 			Data data = program.getListing().getDefinedDataAt(address);
+			if (data != null && data.getDataType() instanceof Array a &&
+				Undefined.isUndefined(a.getDataType())) {
+				return a.getDataType();
+			}
 			return data == null ? null : data.getDataType();
 		}
 
@@ -747,8 +755,18 @@ final class E200TypeFlow {
 		boolean set(Slot s, DataType type) {
 			try {
 				if (s instanceof Global g) {
-					return globals.contains(g.address()) &&
-						E200Data.replace(program.getListing(), g.address(), type);
+					if (!globals.contains(g.address())) {
+						return false;
+					}
+					Data data = program.getListing().getDefinedDataAt(g.address());
+					if (data != null && data.getDataType() instanceof Array a &&
+						Undefined.isUndefined(a.getDataType()) &&
+						a.getElementLength() == type.getLength()) {
+						// an array of undefined elements: the type of its first element
+						type = new ArrayDataType(type, a.getNumElements(), type.getLength(),
+							program.getDataTypeManager());
+					}
+					return E200Data.replace(program.getListing(), g.address(), type);
 				}
 				Function f = s.function(program);
 				if (!settable(f)) {
@@ -819,6 +837,9 @@ final class E200TypeFlow {
 			throws CancelledException {
 		Program program = places.program;
 		boolean signedChar = program.getDataTypeManager().getDataOrganization().isSignedChar();
+		// the data that code passes by address, the instances of all groups: none holds another
+		TreeSet<Address> objects = new TreeSet<>();
+		groups.pointed.values().forEach(objects::addAll);
 		for (Map.Entry<Slot, E200Structures.Shape> e : groups.shapes.entrySet()) {
 			monitor.checkCancelled();
 			Slot root = e.getKey();
@@ -829,7 +850,8 @@ final class E200TypeFlow {
 			Set<Address> instances = groups.pointed.getOrDefault(root, Set.of());
 			// a value that the group's functions access as one word and other code accesses
 			// in pieces is a structure of the pieces
-			TreeMap<Long, DataType> pieces = pieces(program, instances, shape, signedChar);
+			TreeMap<Long, DataType> pieces =
+				pieces(program, instances, objects, shape, signedChar);
 			if (!shape.structure() && pieces.isEmpty()) {
 				continue;
 			}
@@ -1206,6 +1228,21 @@ final class E200TypeFlow {
 		else {
 			existing = manager.addDataType(built, DataTypeConflictHandler.DEFAULT_HANDLER);
 		}
+		// the fields past the spacing of the instances that code reads or uses only under a
+		// condition on a field: a structure of them, which follows the instances that meet it
+		Map.Entry<Structure, String> extension = E200Structures.extension(program, definitions,
+			shape, name, signedChar, limit, pieces);
+		if (extension != null && existing instanceof Structure base) {
+			DataType known = manager.getDataType(E200Types.CATEGORY, extension.getKey().getName());
+			if (known instanceof Structure tail) {
+				E200Structures.refine(manager, tail, extension.getKey());
+			}
+			else {
+				known = manager.addDataType(extension.getKey(),
+					DataTypeConflictHandler.DEFAULT_HANDLER);
+			}
+			base.setDescription(E200Data.extensionRule(known.getName(), extension.getValue()));
+		}
 		return new PointerDataType(existing, 4, manager);
 	}
 
@@ -1214,10 +1251,13 @@ final class E200TypeFlow {
 	 * where code passes the address of a {@code byte} to a function that writes a
 	 * {@code ushort} there, as a value and its complement, the field is the byte and what
 	 * follows it, and the function writes the structure as a whole. By offset in the
-	 * structure, the type of the smaller data at it, when the instances agree.
+	 * structure, the type of the smaller data at it, when the instances agree. The data from
+	 * the next of the {@code objects} that code passes by address on is another object's, as
+	 * the descriptor that follows a shorter record whose fields the structure has too many
+	 * of: no piece of the instance, whatever the order the groups are typed in.
 	 */
 	private static TreeMap<Long, DataType> pieces(Program program, Set<Address> instances,
-			E200Structures.Shape shape, boolean signedChar) {
+			TreeSet<Address> objects, E200Structures.Shape shape, boolean signedChar) {
 		TreeMap<Long, DataType> pieces = new TreeMap<>();
 		if (instances.isEmpty() || shape.fields.isEmpty()) {
 			return pieces;
@@ -1225,6 +1265,7 @@ final class E200TypeFlow {
 		Listing listing = program.getListing();
 		Map<Long, List<DataType>> found = new HashMap<>(); // by offset, the data of all instances
 		for (Address instance : instances) {
+			Address next = objects.higher(instance);
 			for (Map.Entry<Long, E200Structures.Field> e : shape.fields.entrySet()) {
 				long offset = e.getKey();
 				int size = e.getValue().size();
@@ -1235,6 +1276,9 @@ final class E200TypeFlow {
 					Address start = instance.addNoWrap(offset);
 					Address end = start.addNoWrap(size - 1);
 					for (Data d : listing.getDefinedData(new AddressSet(start, end), true)) {
+						if (next != null && d.getMaxAddress().compareTo(next) >= 0) {
+							break; // the next object's data
+						}
 						if (d.getLength() < size && d.getMaxAddress().compareTo(end) <= 0 &&
 							E200Types.primitive(d.getDataType()) &&
 							!Undefined.isUndefined(d.getDataType())) {

@@ -52,6 +52,14 @@ import ghidra.program.model.pcode.*;
  * when it is passed to a function that knows. A structure built in an earlier round, from
  * the functions decompiled then, gets the field types that later rounds show (see
  * {@link #refine}).
+ * <p>
+ * The instances of a structure in flash may lie closer together than the fields the code
+ * reads reach: integer-valued maps carry a scale and an offset after the descriptor that
+ * float maps end with, and the lookup uses them only where the type field says so. The
+ * structure is built up to the spacing of its instances, and the fields past it, when the
+ * code reads or uses them only under comparisons of a field of the structure with
+ * constants, make a structure of their own that follows the instances where the field has
+ * such a value (see {@link #extension} and {@link E200Data#structureAt}).
  */
 final class E200Structures {
 
@@ -173,6 +181,38 @@ final class E200Structures {
 		 * elements). Called once a function is walked; drops the p-code kept for it.
 		 */
 		void resolveGuards() {
+			for (Map.Entry<PcodeOp, Long> e : loads.entrySet()) {
+				// the comparisons of fields of this structure with constants on the way to
+				// each load, or to each use of a value loaded before the comparisons, for the
+				// fields that follow some instances only (see extension)
+				Field f = fields.get(e.getValue());
+				if (f == null) {
+					continue;
+				}
+				List<Guard> own = guards(e.getKey());
+				if (!own.isEmpty()) {
+					f.loadGuards.add(own);
+					continue;
+				}
+				List<PcodeOp> uses = E200Code.consumers(e.getKey().getOutput());
+				List<List<Guard>> conjunctions = uses == null || uses.isEmpty() ? null
+						: new ArrayList<>();
+				for (int i = 0; conjunctions != null && i < uses.size(); i++) {
+					List<Guard> conjunction = guards(uses.get(i));
+					if (conjunction.isEmpty()) {
+						conjunctions = null;
+					}
+					else {
+						conjunctions.add(conjunction);
+					}
+				}
+				if (conjunctions == null) {
+					f.unguardedLoads++;
+				}
+				else {
+					f.loadGuards.addAll(conjunctions);
+				}
+			}
 			for (Field f : fields.values()) {
 				for (Varnode index : f.target.indexes) {
 					for (Map.Entry<PcodeOp, Boolean> e : E200Code.loadsBehind(index, 256)
@@ -201,6 +241,19 @@ final class E200Structures {
 			for (Field f : fields.values()) {
 				f.target.resolveGuards();
 			}
+		}
+
+		/** The comparisons of fields of this structure with constants that hold where an op is */
+		private List<Guard> guards(PcodeOp op) {
+			List<Guard> conjunction = new ArrayList<>();
+			for (E200Code.Comparison c : E200Code.guards(op)) {
+				PcodeOp load = E200Code.loadOf(c.value());
+				Long selector = load == null ? null : loads.get(load);
+				if (selector != null) {
+					conjunction.add(new Guard(selector, c.constant(), c.equal()));
+				}
+			}
+			return conjunction;
 		}
 
 		/** The accesses of all the fields, as those of one element */
@@ -238,6 +291,13 @@ final class E200Structures {
 	record Access(int size, DataType type) {
 	}
 
+	/**
+	 * A comparison of the field at {@code selector} with a constant that holds on the way to
+	 * a load: the field equals the constant, or differs from it
+	 */
+	record Guard(long selector, long value, boolean equal) {
+	}
+
 	/** A field of a shape: what code does at one offset */
 	static final class Field {
 		final List<Access> accesses = new ArrayList<>();
@@ -265,6 +325,16 @@ final class E200Structures {
 		final Set<Address> targets = new TreeSet<>();
 		/** The calls through the field's value */
 		final List<E200FunctionPointers.Call> calls = new ArrayList<>();
+		/**
+		 * The comparisons of fields of the structure with constants that hold on the way to
+		 * each load of the field, or to each use of a value loaded before them, one list per
+		 * load or use (see {@link Shape#resolveGuards})
+		 */
+		final List<List<Guard>> loadGuards = new ArrayList<>();
+		/** The loads of the field that no such comparison guards */
+		int unguardedLoads;
+		/** The stores to the field */
+		int stores;
 
 		/** The size most accesses of the field have, the larger on a tie */
 		int size() {
@@ -282,6 +352,9 @@ final class E200Structures {
 			indexFields.addAll(other.indexFields);
 			targets.addAll(other.targets);
 			calls.addAll(other.calls);
+			loadGuards.addAll(other.loadGuards);
+			unguardedLoads += other.unguardedLoads;
+			stores += other.stores;
 		}
 	}
 
@@ -386,7 +459,15 @@ final class E200Structures {
 					if (op.getInput(1) == v && out != null) {
 						Field f = shape.field(offset);
 						shape.loads.put(op, offset);
-						f.accesses.add(new Access(out.getSize(), E200Integers.of(out)));
+						DataType type = E200Integers.of(out);
+						if (type instanceof Pointer && (out.getSize() == 4 || out.getSize() == 8) &&
+							E200Code.usedAsFloat(out)) {
+							// a float that the decompiler typed after the field of a
+							// structure there, as p[1].f4 for the word after p
+							type = out.getSize() == 4 ? FloatDataType.dataType
+									: DoubleDataType.dataType;
+						}
+						f.accesses.add(new Access(out.getSize(), type));
 						if (out.getSize() == 4) {
 							DataType cast = E200Code.castTo(out);
 							if (cast != null) {
@@ -409,6 +490,7 @@ final class E200Structures {
 						Varnode value = op.getInput(2);
 						Field f = shape.field(offset);
 						f.accesses.add(new Access(value.getSize(), E200Integers.of(value)));
+						f.stores++;
 						Address target = E200Code.addressOf(functions.getProgram(), value, 0);
 						if (target != null && functions.getFunctionAt(target) != null) {
 							f.targets.add(target);
@@ -512,10 +594,20 @@ final class E200Structures {
 					type = new PointerDataType(VoidDataType.dataType, 4, manager);
 				}
 				else if (f.target.structure()) {
-					Structure target = build(program, definitions, f.target,
-						name + "_f" + Long.toHexString(offset), signedChar, depth + 1, 0,
-						new TreeMap<>());
-					type = target == null ? null : new PointerDataType(target, 4, manager);
+					DataType cast = f.casts.isEmpty() ? null : castType(f.casts);
+					if (cast instanceof Pointer p && E200Types.ownStructure(p.getDataType()) &&
+						elementsOf((Structure) p.getDataType(), f.target)) {
+						// passed on as a pointer to a structure of the analyzer's whose
+						// elements the accesses through it are fields of, as p->f14->f8 is
+						// the first field of p->f14[1]: what it points to, an array of them
+						type = cast;
+					}
+					else {
+						Structure target = build(program, definitions, f.target,
+							name + "_f" + Long.toHexString(offset), signedChar, depth + 1, 0,
+							new TreeMap<>());
+						type = target == null ? null : new PointerDataType(target, 4, manager);
+					}
 				}
 				else if (f.target.elements()) {
 					// the elements of an array, read as p[i] and p[i + 1]
@@ -599,6 +691,161 @@ final class E200Structures {
 				comments.get(e.getKey()));
 		}
 		return structure;
+	}
+
+	/**
+	 * The fields past {@code limit}, the spacing of a structure's instances, that code reads
+	 * only where a field of the structure has some values: a structure of them, named
+	 * {@code <name>_ext}, which follows the instances that have such a value, and the rule
+	 * ({@code f10 != 0}, or {@code f2 = 4, 8, c, 10}). The scale and offset of an
+	 * integer-valued map follow its descriptor, which a float map ends with, and the lookups
+	 * use them only in the branches of the integer types. A field counts when each load of it,
+	 * or each use of a value loaded before the comparisons, lies where comparisons of one
+	 * integer field below the limit with constants hold (see {@link Shape#resolveGuards}); the
+	 * fields keep their names, {@code f14} at offset 0 of the structure that follows. Null
+	 * where no field lies past the limit, a field there is written, or read or used without
+	 * such a comparison, or the comparisons leave no value out.
+	 */
+	static Map.Entry<Structure, String> extension(Program program,
+			E200FunctionPointers.Definitions definitions, Shape shape, String name,
+			boolean signedChar, long limit, TreeMap<Long, DataType> pieces) {
+		if (limit <= 0 || shape.fields.ceilingKey(limit) == null) {
+			return null;
+		}
+		List<List<Guard>> conjunctions = new ArrayList<>();
+		long end = limit;
+		for (Map.Entry<Long, Field> e : shape.fields.tailMap(limit).entrySet()) {
+			Field f = e.getValue();
+			if (f.size() == 0) {
+				continue;
+			}
+			if (f.unguardedLoads > 0 || f.stores > 0 || f.loadGuards.isEmpty()) {
+				return null; // read or used without a comparison, or written
+			}
+			conjunctions.addAll(f.loadGuards);
+			end = Math.max(end, e.getKey() + f.size());
+		}
+		if (conjunctions.isEmpty()) {
+			return null;
+		}
+		// the selector: a field below the limit that every conjunction compares
+		Long selector = null;
+		for (Guard g : conjunctions.get(0)) {
+			boolean everywhere = g.selector() < limit;
+			for (List<Guard> c : conjunctions) {
+				everywhere &= c.stream().anyMatch(h -> h.selector() == g.selector());
+			}
+			if (everywhere) {
+				selector = g.selector();
+				break;
+			}
+		}
+		Field selected = selector == null ? null : shape.fields.get(selector);
+		if (selected == null || selected.size() == 0 || selected.size() > 4) {
+			return null;
+		}
+		Set<Long> present = new TreeSet<>(); // the values whose branches read the fields
+		Set<Long> absent = null; // the values no branch without an equality reads them in
+		for (List<Guard> conjunction : conjunctions) {
+			Set<Long> equal = new TreeSet<>();
+			Set<Long> other = new TreeSet<>();
+			for (Guard g : conjunction) {
+				if (g.selector() == selector) {
+					(g.equal() ? equal : other).add(g.value());
+				}
+			}
+			if (equal.size() > 1) {
+				continue; // never holds
+			}
+			if (equal.size() == 1) {
+				long value = equal.iterator().next();
+				if (!other.contains(value)) {
+					present.add(value);
+				}
+			}
+			else if (absent == null) {
+				absent = other;
+			}
+			else {
+				absent.retainAll(other);
+			}
+		}
+		String rule;
+		if (absent != null) {
+			absent.removeAll(present);
+			if (absent.isEmpty()) {
+				return null; // read whatever the value
+			}
+			rule = "f" + Long.toHexString(selector) + " != " + values(absent);
+		}
+		else if (!present.isEmpty()) {
+			rule = "f" + Long.toHexString(selector) + " = " + values(present);
+		}
+		else {
+			return null;
+		}
+		// the pieces past the limit are the data of the next instance, not of this one
+		Structure full = build(program, definitions, shape, name + "_ext", signedChar, 0, end,
+			new TreeMap<>(pieces.headMap(limit)));
+		if (full == null || full.getLength() <= limit) {
+			return null;
+		}
+		StructureDataType tail = new StructureDataType(E200Types.CATEGORY, name + "_ext",
+			(int) (full.getLength() - limit), program.getDataTypeManager());
+		for (DataTypeComponent c : full.getDefinedComponents()) {
+			if (c.getOffset() >= limit) {
+				tail.replaceAtOffset((int) (c.getOffset() - limit), c.getDataType(), c.getLength(),
+					c.getFieldName(), c.getComment());
+			}
+		}
+		if (tail.getNumDefinedComponents() == 0) {
+			return null;
+		}
+		tail.setDescription("The fields from offset 0x" + Long.toHexString(limit) + " of " +
+			name + ", which the code reads where " + rule);
+		return Map.entry(tail, rule);
+	}
+
+	private static String values(Set<Long> values) {
+		List<String> names = new ArrayList<>();
+		for (long v : values) {
+			names.add(Long.toHexString(v));
+		}
+		return String.join(", ", names);
+	}
+
+	/**
+	 * Whether the accesses of a shape are fields of a structure, or of the elements of an
+	 * array of it: at the offset of a field modulo the structure's length, of the field's
+	 * size, with no type of another kind, and no index with another stride
+	 */
+	private static boolean elementsOf(Structure s, Shape shape) {
+		int length = s.getLength();
+		if (length <= 0 || shape.fields.isEmpty() ||
+			shape.stride != 0 && shape.stride != length) {
+			return false;
+		}
+		for (Map.Entry<Long, Field> e : shape.fields.entrySet()) {
+			Field f = e.getValue();
+			int size = f.size();
+			if (size == 0) {
+				continue;
+			}
+			int offset = (int) (e.getKey() % length);
+			DataTypeComponent c = s.getComponentAt(offset);
+			if (c == null || c.getOffset() != offset || c.getLength() != size ||
+				c.getDataType() instanceof DefaultDataType) {
+				return false;
+			}
+			for (Access a : f.accesses) {
+				if (a.type() != null && E200Types.informative(a.type()) &&
+					E200Types.informative(c.getDataType()) &&
+					E200Types.kind(a.type()) != E200Types.kind(c.getDataType())) {
+					return false;
+				}
+			}
+		}
+		return true;
 	}
 
 	/**
@@ -828,10 +1075,41 @@ final class E200Structures {
 			if (!E200Types.informative(p)) {
 				return true;
 			}
+			if (E200Types.ownStructure(p.getDataType()) &&
+				E200Types.ownStructure(q.getDataType()) &&
+				untypedFieldsOf((Structure) p.getDataType(), (Structure) q.getDataType())) {
+				// a structure of untyped words that are fields of the structure, or of the
+				// elements of an array of it, that code passes the pointer on as
+				return true;
+			}
 			return E200Types.ownStructure(q.getDataType()) && replaceable(current) &&
 				firstField((Structure) q.getDataType(), 0, p.getDataType().getLength());
 		}
 		return false;
+	}
+
+	/**
+	 * Whether the fields of a structure are all undefined and each lies where a field of
+	 * {@code other} of its size does, or that field of an element of an array of it
+	 */
+	private static boolean untypedFieldsOf(Structure structure, Structure other) {
+		int length = other.getLength();
+		if (length <= 0 || structure.getNumDefinedComponents() == 0 ||
+			structure.isEquivalent(other)) {
+			return false;
+		}
+		for (DataTypeComponent c : structure.getDefinedComponents()) {
+			if (!Undefined.isUndefined(c.getDataType())) {
+				return false;
+			}
+			int offset = c.getOffset() % length;
+			DataTypeComponent o = other.getComponentAt(offset);
+			if (o == null || o.getOffset() != offset || o.getLength() != c.getLength() ||
+				o.getDataType() instanceof DefaultDataType) {
+				return false;
+			}
+		}
+		return true;
 	}
 
 	/**

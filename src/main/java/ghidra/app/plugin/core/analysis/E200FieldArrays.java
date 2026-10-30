@@ -24,7 +24,7 @@ import ghidra.program.model.data.*;
 import ghidra.program.model.listing.*;
 import ghidra.program.model.mem.MemoryBlock;
 import ghidra.program.model.scalar.Scalar;
-import ghidra.program.model.symbol.ReferenceManager;
+import ghidra.program.model.symbol.*;
 import ghidra.program.model.util.CodeUnitInsertionException;
 import ghidra.util.exception.CancelledException;
 import ghidra.util.task.TaskMonitor;
@@ -283,7 +283,7 @@ final class E200FieldArrays {
 			for (Instance i : instances) {
 				for (Count c : candidates()) {
 					long n = c.of(i.data());
-					if (n > 0 && fitsExactly(n, i.gap())) {
+					if (n > 1 && fitsExactly(n, i.gap())) { // one element is no array
 						countVotes.merge(c, 1, Integer::sum);
 					}
 				}
@@ -481,8 +481,9 @@ final class E200FieldArrays {
 				try {
 					List<Remainder> remainders = remainders(carved, i.target(), end);
 					listing.clearCodeUnits(i.target(), end, false);
-					Data array = listing.createData(i.target(),
-						new ArrayDataType(type, (int) n, size, program.getDataTypeManager()));
+					// one element is the value at the target, of the type, not an array of one
+					Data array = listing.createData(i.target(), n == 1 ? type
+							: new ArrayDataType(type, (int) n, size, program.getDataTypeManager()));
 					for (Remainder r : remainders) {
 						r.create(listing, program.getDataTypeManager());
 					}
@@ -558,8 +559,9 @@ final class E200FieldArrays {
 				}
 				carved.add(at);
 			}
-			if (at != null && at.getDataType() instanceof Array a && a.getNumElements() == n &&
-				a.getDataType().isEquivalent(type)) {
+			if (at != null && (at.getDataType() instanceof Array a && a.getNumElements() == n &&
+				a.getDataType().isEquivalent(type) ||
+				n == 1 && at.getDataType().isEquivalent(type))) {
 				return null; // there already
 			}
 			AddressSet range = new AddressSet(start, end);
@@ -652,28 +654,37 @@ final class E200FieldArrays {
 
 		/**
 		 * Whether an array a count field gives the length of may reach {@code end} past the
-		 * limit: no code that is not stray lies in the range, and every pointer target in it
-		 * is only pointed to by words in the array itself or in data that holds no pointers
-		 * (values that happen to be addresses)
+		 * limit: no code that is not stray lies in the range, and no instruction references
+		 * an address in it that a word outside the array holds. The code's count says what
+		 * the array covers; a word elsewhere that holds an address in it is a value that
+		 * happens to be an address, a table of the flash sectors, or a word of code that
+		 * was not disassembled, unless code uses the address.
 		 */
 		boolean passable(Address start, Address end, MemoryBlock block) {
 			if (codeAfter(start, end.next(), block) != null) {
 				return false;
 			}
-			for (List<Address> sources : pointers.subMap(start, false, end, true).values()) {
-				for (Address source : sources) {
-					if (source.compareTo(start) >= 0 && source.compareTo(end) <= 0) {
-						continue; // in the array
-					}
-					Data d = listing.getDataContaining(source);
-					Data value = d == null ? null
-							: d.getPrimitiveAt((int) source.subtract(d.getAddress()));
-					if (value == null || value.getDataType() instanceof Pointer) {
-						return false;
-					}
+			for (Map.Entry<Address, List<Address>> e : pointers.subMap(start, false, end, true)
+					.entrySet()) {
+				boolean inside = true;
+				for (Address source : e.getValue()) {
+					inside &= source.compareTo(start) >= 0 && source.compareTo(end) <= 0;
+				}
+				if (!inside && referencedByCode(e.getKey())) {
+					return false;
 				}
 			}
 			return true;
+		}
+
+		/** Whether an instruction references an address */
+		private boolean referencedByCode(Address address) {
+			for (Reference ref : references.getReferencesTo(address)) {
+				if (listing.getInstructionAt(ref.getFromAddress()) != null) {
+					return true;
+				}
+			}
+			return false;
 		}
 
 		/**
