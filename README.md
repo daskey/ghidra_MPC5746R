@@ -79,9 +79,18 @@ to) and `E200Types.java` (the data types the analysis chooses and makes).
 - **Boot headers** of the MPC57xx boot assist flash (`0x005A....` at the start of a flash
   block or a 16 KB boundary): typed `MPC57xx_boot_header`, with a function `reset` (or
   `reset_0`, `reset_1`, ...) at each core's reset vector.
-- **Interrupt vector tables**: at least 8 vectors of `e_b` to a handler, 16 bytes apart
-  from a 256-byte boundary, labeled `IVOR0_CriticalInput` to `IVOR34_EfpuRoundException`,
-  with the handlers made functions.
+- **Interrupt vector tables**: at least 8 vectors 16 bytes apart from a 256-byte boundary,
+  each running straight to an `e_b` to its handler within its 16 bytes: at its start, or
+  after register setup that does not access memory, as an operating system loads the
+  vector's number before branching to a common entry (`e_li r1,0x5` and `e_b`); a `se_b`,
+  as the short cases of a switch end with, is no vector's branch. They are labeled
+  `IVOR0_CriticalInput` to `IVOR34_EfpuRoundException`, with the handlers made functions and
+  the padding after each branch (`e_nop`, a branch to itself, `se_nop`) disassembled.
+- **Hardware vectors of the interrupt controller**: in hardware vector mode the core branches
+  to the vector table plus 0x1000 plus 4 times the interrupt source's number, where an
+  `e_b` leads to the source's entry. Where the words there are all erased or `e_b`, they
+  are labeled `INTC_vector_<number>` and the entries made functions, after the common entry
+  that several entries branch to (the dispatcher they pass the source's number to).
 
 ### Small data area bases and constant references
 
@@ -143,10 +152,17 @@ each with an option:
   directly, such as getters and state machine handlers reached through tables, match no
   start pattern. A gap after a return or unconditional branch becomes functions when all of
   it decodes as complete subroutines that stay in the gap, use no `se_illegal` and none of
-  the instructions typical of data decoded as code that the program does not otherwise use.
-  An empty handler, a single `se_blr` between two functions, is too short for that rule; it
-  becomes a function when a word of flash in a column of pointers to functions points to it,
-  as the entries of a table of handlers do: the words one stride before and after it (4 to
+  the instructions typical of data decoded as code that the program does not otherwise use,
+  each of at least two instructions or a lone `se_blr`, an empty function among the others;
+  the padding a gap begins with, `se_nop` or the `se_or r4,r4` (`44 44`) some compilers fill
+  with, is disassembled too once a function or data follows it. A run of `e_b` right after
+  code that does not fall through is a branch table that a computed jump selects an entry of
+  (the interrupt dispatch of an operating system adds four times a number to the table's
+  address and returns to it): it is disassembled, and the code its entries branch to, outside
+  any function, becomes functions.
+  An empty handler, a single `se_blr`, in a gap that holds data too, is out of reach of that
+  rule; it becomes a function when a word of flash in a column of pointers to functions points
+  to it, as the entries of a table of handlers do: the words one stride before and after it (4 to
   32 bytes, as a field of a table of structures is) point to functions, or a word up to two
   strides before it and one up to two strides after it do and none of the four points
   elsewhere, or the word ends a column of two with no address beyond it (where the words
@@ -159,8 +175,8 @@ each with an option:
   function. A pointer target within 8 bytes of the code, or inside it, that is no function
   says the bytes are data: the values of a table that a table of structures points to one by
   one (`04 04 00 04`) decode as code too; so does code that writes a register compiled code
-  keeps (r2, r13, r14-r31) without a stack frame to save it in. Each such function gets an
-  analysis bookmark.
+  keeps (r2, r13, r14-r31) without a stack frame to save it in. Each function these rules
+  find gets an analysis bookmark.
 - **Calling conventions for kept registers** (`E200KeptRegisters.java`): e200 compilers
   know which volatile registers (r0, r3-r12) the functions they compile change, and keep
   values in the others across calls, which the decompiler showed as `extraout_` variables.
@@ -409,17 +425,17 @@ decompiled, per image:
 
 | | Mean | Range |
 |---|---|---|
-| Functions | 14,503 | 13,969-14,993 |
-| Instructions | 444,016 | 418,381-462,769 |
+| Functions | 14,577 | 14,051-15,062 |
+| Instructions | 444,433 | 418,809-463,180 |
 | Decompiler failures | 0 | 0 |
 | Functions with decompiler warnings | 93 | 90-96 |
 | Functions with `undefined` in their signature | 31 | 31 |
 | Functions with `extraout_` variables | 31 | 30-31 |
 | `undefinedN` in the C | 1,320 | 1,314-1,325 |
-| `DAT_` references in the C | 447 | 438-457 |
-| Pointer casts in the C | 4,315 | 4,115-4,451 |
+| `DAT_` references in the C | 444 | 435-454 |
+| Pointer casts in the C | 4,312 | 4,112-4,448 |
 | Calls through `(code *)` casts | 31 | 31 |
-| Analysis time (2 CPUs) | 299 s | 274 s-319 s |
+| Analysis time (2 CPUs) | 289 s | 270 s-309 s |
 
 Most decompiler warnings are about infinite loops (halt loops) and unreachable blocks the
 decompiler removes; the `extraout_` and `undefined` signatures are in hand-written

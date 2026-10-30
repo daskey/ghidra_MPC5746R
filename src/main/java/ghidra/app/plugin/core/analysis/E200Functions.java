@@ -51,7 +51,8 @@ final class E200Functions {
 	private static final String OPTION_DESCRIPTION_GAPS =
 		"Create functions in a gap of undefined bytes and instructions of no function after a\n" +
 			"function's return or unconditional branch, when all of it decodes as complete VLE\n" +
-			"subroutines (apart from se_nop or erased padding).";
+			"subroutines (apart from se_nop or erased padding), and at the code that tables of\n" +
+			"handlers and branch tables after computed jumps lead to.";
 	private static final String OPTION_NAME_KEPT = "Calling conventions for kept registers";
 	private static final String OPTION_DESCRIPTION_KEPT =
 		"Give a function that keeps some of the volatile registers r0 and r3-r12, when a caller\n" +
@@ -99,6 +100,7 @@ final class E200Functions {
 			found = !inGaps.isEmpty();
 			found |= E200CodeGaps.findPointedFunctions(program, new HashSet<>(inGaps),
 				monitor) > 0;
+			found |= E200CodeGaps.findBranchTables(program, monitor) > 0;
 		}
 		boolean ok = true;
 		Set<Function> identified = new HashSet<>();
